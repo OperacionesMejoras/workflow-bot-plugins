@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/EasyIndustry/plugins-registry/schema/plugin.schema.json",
+  "title": "workflow-bot-core Plugin Manifest Entry",
+  "description": "Entrada del índice para un plugin de workflow-bot-core. Un archivo plugins/<name>.json por plugin.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "description",
+    "source",
+    "ports",
+    "maintainer",
+    "repo_url",
+    "compatible_core",
+    "license"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Nombre del plugin. Debe coincidir con el nombre del archivo (plugins/<name>.json) y con el nombre declarado en el PluginManifest del paquete.",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Descripción corta (una línea) de qué hace el plugin.",
+      "minLength": 10,
+      "maxLength": 200
+    },
+    "source": {
+      "type": "string",
+      "description": "De dónde se instala el paquete: nombre de paquete PyPI (ej. 'workflow-bot-plugin-files') o URL pip-installable git+https://... .",
+      "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]*|git\\+https://.+)$"
+    },
+    "ports": {
+      "type": "array",
+      "description": "Ports de workflow-bot-core que declara este plugin.",
+      "items": {
+        "type": "string",
+        "enum": ["http", "fs", "process", "clock", "browser", "window"]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "maintainer": {
+      "type": "string",
+      "description": "Usuario u organización de GitHub responsable del plugin.",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$"
+    },
+    "repo_url": {
+      "type": "string",
+      "description": "URL del repositorio donde vive el código del plugin.",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "compatible_core": {
+      "type": "string",
+      "description": "Constraint de versión de workflow-bot-core contra el que se probó el plugin (sintaxis estilo PEP 440, ej. '>=0.3.0,<0.5.0').",
+      "minLength": 1
+    },
+    "license": {
+      "type": "string",
+      "description": "Identificador de licencia SPDX (ej. 'MIT', 'Apache-2.0').",
+      "minLength": 1
+    }
+  }
+}

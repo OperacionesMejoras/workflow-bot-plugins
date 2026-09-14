@@ -1,0 +1,10 @@
+{
+  "name": "conexiones",
+  "description": "Tools genéricas para requests HTTP (REST/JSON) reutilizables desde cualquier flujo de workflow-bot-core.",
+  "source": "workflow-bot-plugin-conexiones",
+  "ports": ["http"],
+  "maintainer": "EasyIndustry",
+  "repo_url": "https://github.com/EasyIndustry/workflow-bot-plugin-conexiones",
+  "compatible_core": ">=0.3.0",
+  "license": "MIT"
+}

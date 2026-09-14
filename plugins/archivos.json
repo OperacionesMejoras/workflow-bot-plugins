@@ -1,0 +1,10 @@
+{
+  "name": "archivos",
+  "description": "Tools genéricas de lectura, escritura y manejo de archivos locales para flujos de workflow-bot-core.",
+  "source": "workflow-bot-plugin-archivos",
+  "ports": ["fs"],
+  "maintainer": "EasyIndustry",
+  "repo_url": "https://github.com/EasyIndustry/workflow-bot-plugin-archivos",
+  "compatible_core": ">=0.3.0",
+  "license": "MIT"
+}

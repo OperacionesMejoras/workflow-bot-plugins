@@ -1,0 +1,97 @@
+name: Validate plugin manifests
+
+# Solo valida ESTRUCTURA (JSON Schema) de los plugins/*.json tocados en el PR.
+# A propósito NO instala ni ejecuta el paquete que el manifest declara en "source":
+# eso es curaduría manual (ver docs/curar-un-plugin.md) porque instalar código
+# propuesto en un PR externo sin revisión previa es superficie de supply-chain.
+
+on:
+  pull_request:
+    paths:
+      - "plugins/**"
+      - "schema/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validator dependencies
+        run: pip install jsonschema
+
+      - name: Determine changed plugin files
+        id: changed
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD -- 'plugins/*.json')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$changed" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Validate changed manifests against schema
+        if: steps.changed.outputs.files != ''
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          python - <<'PYEOF'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from jsonschema import Draft7Validator
+
+          schema = json.loads(Path("schema/plugin.schema.json").read_text())
+          validator = Draft7Validator(schema)
+
+          files = [f for f in os.environ["CHANGED_FILES"].splitlines() if f.strip()]
+          if not files:
+              print("No changed plugins/*.json files to validate.")
+              sys.exit(0)
+
+          failed = False
+          for file_path in files:
+              path = Path(file_path)
+              if not path.exists():
+                  # File was deleted in this PR; nothing to validate.
+                  continue
+
+              print(f"::group::Validating {file_path}")
+              try:
+                  data = json.loads(path.read_text())
+              except json.JSONDecodeError as exc:
+                  print(f"::error file={file_path}::Invalid JSON: {exc}")
+                  failed = True
+                  print("::endgroup::")
+                  continue
+
+              errors = sorted(validator.iter_errors(data), key=lambda e: e.path)
+              for error in errors:
+                  location = "/".join(str(p) for p in error.path) or "<root>"
+                  print(f"::error file={file_path}::{location}: {error.message}")
+                  failed = True
+
+              expected_name = path.stem
+              actual_name = data.get("name")
+              if actual_name != expected_name:
+                  print(
+                      f"::error file={file_path}::\"name\" ({actual_name!r}) debe coincidir "
+                      f"con el nombre del archivo ({expected_name!r})"
+                  )
+                  failed = True
+
+              print("::endgroup::")
+
+          if failed:
+              sys.exit(1)
+          print(f"All {len(files)} changed manifest(s) are valid.")
+          PYEOF
