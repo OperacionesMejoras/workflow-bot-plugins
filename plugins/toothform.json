@@ -1,0 +1,16 @@
+{
+  "name": "toothform",
+  "description": "Exportar STL con QR y placa base en ToothFORM: por línea de comandos (release 20260518) o clickeando su ventana, y leer el log.",
+  "source": "workflow-bot-plugin-toothform",
+  "path": "toothform",
+  "ports": [
+    "process",
+    "fs",
+    "clock",
+    "window"
+  ],
+  "maintainer": "OperacionesMejoras",
+  "repo_url": "https://github.com/OperacionesMejoras/workflow-bot-plugins",
+  "compatible_core": ">=0.3.0b4",
+  "license": "MIT"
+}
