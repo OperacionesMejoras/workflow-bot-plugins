@@ -1,0 +1,24 @@
+{
+  "FilesToProcess": {
+	"OpenFolder": "D:\\file",
+	"Type": "Type1"
+  },
+  "General": {
+    "ExportPrintPath": "D:\\0WORK\\debug_file\\test\\res",
+	"ExportFilePath": "D:\\0WORK\\debug_file\\test\\res"
+  },
+  "ParameterSettings": {
+    "ShellThickness": "1.8",
+    "BottomPlaneThickness": "1.0",
+    "LimitR": "98.0",
+    "LimitH": "23.0",
+    "LimitX": "3.0",
+    "ToothMinVolume": "30.0",
+    "Boolean": "1",
+    "QrSize": "15.0",
+    "TransDis": "0.0",
+    "Radius1": "2.62",
+    "Radius2": "2.12",
+	"ImportExtPos": "0"
+  }
+}

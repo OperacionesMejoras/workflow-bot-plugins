@@ -1,0 +1,71 @@
+%% folder: FORM
+%% description: Busca los STL del caso, los exporta con QR en ToothFORM por línea de comandos (Type1), mueve el export a la carpeta del caso y marca Apto impresion
+%%
+%% Es TOOTHFORM CNC4 V2 con ToothFORM release 20260518 o posterior: en vez de
+%% "está abierto / clickear Export / esperar / leer el log" (ocho nodos con
+%% retry_gate, y el operador dejando el STL cargado), un solo nodo
+%% toothform.exportar corre Toothform.exe con un JSON, espera y lee el log.
+%% Sin ventana: no hace falta ToothFORM abierto, ni el port window, ni tasklist.
+%%
+%% Variables que no vienen de Xano y hay que darle con la fila (o por {env.*}):
+%% toothformExe = ruta de Toothform.exe (release ≥ 20260518); filesFolder =
+%% carpeta con los STL del caso; toothformLogDir = carpeta de salida (ahí caen
+%% el log, el JSON y {id_externo}\ con el export); carpetaCaso = carpeta del
+%% caso adonde se mueve el export y se copia el log. filesFolder,
+%% toothformLogDir y carpetaCaso adentro del fs_root y en ASCII: ToothFORM no
+%% encuentra rutas con acentos y termina sin exportar ni dejar log.
+%%
+%% Requisitos de la instalación: en boot.env, process_allowlist con el
+%% ejecutable (process_allowlist=Toothform, compara por nombre sin ruta ni
+%% extensión); el plugin toothform ≥ 0.2.0.
+%%
+%% Si exportar da err hay dos casos y los separa {hubo_log}: con log, el
+%% export terminó con fallas → se copia el log al caso y se comenta; sin log,
+%% ToothFORM crasheó o no encontró la carpeta → "comentario crash".
+flowchart TD
+    SN(inicio)
+    N1009["refrescar row § connections.llamar_y_fusionar | connection=Refresh row"]
+    N1008{ES APTO QR? § sub_stage}
+    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, etiqueta=.stl"]
+    N1005["Comentario no hay carpeta en CASOS TERMINADOS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=BOT - No se encontraron los casos renombrados para TOOTHFORM, pais={pais}"]
+    EXP["Exportar en ToothFORM § toothform.exportar | ejecutable={toothformExe}, carpeta={filesFolder}, salida={toothformLogDir}, tipo=Type1, timeout=900"]
+    N5["OK - continuar § core.log | message=Export completado, level=info"]
+    D_LOG{hubo log? § hubo_log}
+    COMP_FILES["Comprobar cantidad § archivos.comparar_conteo | carpeta_a={toothformLogDir}\{id_externo}, carpeta_b={filesFolder}, etiqueta=toothform"]
+    ERR_COMP["Error conteo § core.log | message=Faltan archivos exportados, level=error"]
+    MF["mover a carpeta del caso § archivos.mover | origen={toothformLogDir}\{id_externo}, destino={carpetaCaso}\{id_externo}"]
+    N1003["NOLOCO - Apto impreison § connections.llamar | connection=Apto impresion"]
+    N1000["copiar archivo § archivos.copiar | origen={toothformLogDir}\{checkLogResult.log_file}, destino={carpetaCaso}\{checkLogResult.log_file}"]
+    N1004["Revision Impresion digital § connections.llamar | connection=Revision impresion digital"]
+    N1001["comentario noloco § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto={checkLogResult.message} log: - {checkLogResult.log_file} - en carpeta del caso, pais={pais}"]
+    N1006["estatus error § core.set_status | status=err"]
+    N1007["comentario crash § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=Crasheo el toothform, pais={pais}"]
+    N1011{Es KIDS? § tratamiento_intranet}
+    N1012["COMENTARIO KIDS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=Es KIDS, pais={pais}"]
+    N1013{ES 3a3? § feston}
+    N1014["COMENTARIO FESTON 3a3 § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=ES FESTON 3 a 3, pais={pais}"]
+    SN -->N1009
+    N1009 -->N1013
+    N1008 -->|Apto QR| N29
+    N29 -->|ok| EXP
+    N29 -->|err| N1005
+    N1005 -->N1004
+    EXP -->|ok| N5
+    EXP -->|err| D_LOG
+    D_LOG -->|si| N1000
+    D_LOG -->N1007
+    N5 -->COMP_FILES
+    COMP_FILES -->|ok| MF
+    COMP_FILES -->|err| ERR_COMP
+    ERR_COMP -->N1006
+    MF -->N1003
+    N1000 -->N1001
+    N1001 -->N1004
+    N1004 -->N1006
+    N1007 -->N1004
+    N1011 -->N1008
+    N1011 -->|Kids, Kids Full, Kids Medium, Kids Fast, Kids Full RC| N1012
+    N1012 -->N1004
+    N1013 -->N1011
+    N1013 -->|Feston: De 3 a 3| N1014
+    N1014 -->N1004

@@ -1,62 +1,55 @@
-# plugins-registry
+# workflow-bot-plugins (Operaciones y Mejoras)
 
-Índice curado y público de plugins reutilizables para [`workflow-bot-core`](https://github.com/EasyIndustry/workflow-bot-core), el motor que ejecuta flujos de trabajo escritos en Mermaid.
+Catálogo **curado y con código** de plugins para el Bot (la webapp sobre
+[`workflow-bot-core`](https://github.com/EasyIndustry/workflow-bot-core)).
+Es un fork del índice público `EasyIndustry/workflow-bot-plugins` con la
+misma estructura —un `plugins/<name>.json` por plugin, validado contra
+`schema/plugin.schema.json`— y una diferencia: acá **el código vive en el
+repo**, en la carpeta que cada entrada declara en `path`. Las máquinas de
+planta no tienen PyPI; un tarball de GitHub, sí.
 
-## Qué es esto (y qué no es)
+## Cómo se usa
 
-Este repo **no aloja código de plugins**. Es un índice: cada plugin es un paquete Python instalable (PyPI o `git+https://...`) que vive en su propio repositorio, con su propio ciclo de releases, issues y mantenedor. Acá solo se registra metadata que permite descubrirlo e instalarlo.
+El Bot se instala **sin plugins**. En la app, Plug ins → *Plugins en línea*
+lista las entradas de este repo, se elige la rama, y cada plugin se instala
+con un click: la webapp baja la rama, saca la carpeta `path`, la valida en
+otro proceso (como cualquier archivo subido) y la copia a `plugins_dir` con
+un `.procedencia.json` (repo, rama, commit, versión). Ver
+`webapp/plugin_catalog.py` en el repo del Bot.
 
-Un plugin es un paquete que expone un `PluginManifest` (definido en `backend/core/contract.py` de `workflow-bot-core`) con las `Tool`/`Action` que ofrece, y que declara qué **ports** del core necesita (`http`, `fs`, `process`, `clock`, `browser`, `window`) en lugar de importar esas librerías directamente. El core lo carga en runtime vía entry point.
+Si el repo es privado, la instalación necesita un token de GitHub con
+lectura, cargado en Config → Variables como `PLUGINS_GITHUB_TOKEN` (secreto).
 
-**Solo entran acá plugins genéricos**: reutilizables por cualquier instalación de `workflow-bot-core` (manejo de archivos, conexiones HTTP genéricas, etc). Plugins atados a un negocio o cliente puntual (por ejemplo, integrados con un sistema externo específico de una instalación) son privados y no se indexan acá.
+## Ramas
+
+- **`cured`**: lo curado. Lo que se instala en producción.
+- **`draft`**: lo que todavía no terminó. La app lo avisa al elegirla.
+
+Un plugin nace en `draft`, se prueba contra una instalación real y pasa a
+`cured` con un merge. La rama que usa cada instalación queda guardada en
+la instalación.
 
 ## Estructura
 
 ```
-plugins/<name>.json     # una entrada por plugin (ver schema/plugin.schema.json)
+plugins/<name>.json     # la entrada: qué es, qué ports pide, dónde está (path)
+<name>/                 # el código: paquete con __init__.py que exporta PLUGIN
 schema/plugin.schema.json
 docs/curar-un-plugin.md
 ```
 
-Un archivo por plugin, no un índice monolítico: así cada PR que agrega o actualiza un plugin toca un solo archivo y el diff queda legible.
+## Reglas de los plugins
 
-## Instalar un plugin desde este índice
+Las del Bot (`CLAUDE.md` del repo del Bot): genéricos, con nombre de
+herramienta —nunca de cliente ni de sistema externo—; una llamada HTTP
+guardada es una Action de `connections`, no un plugin; los ports que piden
+son exactamente los que usan; tests propios (`<name>/tests/`) con los fakes
+del núcleo; comentarios y commits en castellano que explican el por qué.
 
-1. Buscá el archivo correspondiente en `plugins/<name>.json`. Por ejemplo, `plugins/archivos.json`:
+## Plugins
 
-   ```json
-   {
-     "name": "archivos",
-     "description": "Tools genéricas de lectura, escritura y manejo de archivos locales...",
-     "source": "workflow-bot-plugin-archivos",
-     "ports": ["fs"],
-     "maintainer": "EasyIndustry",
-     "repo_url": "https://github.com/EasyIndustry/workflow-bot-plugin-archivos",
-     "compatible_core": ">=0.3.0",
-     "license": "MIT"
-   }
-   ```
-
-2. Instalá el paquete que declara `source`:
-
-   ```bash
-   # si source es un nombre de paquete PyPI
-   pip install workflow-bot-plugin-archivos
-
-   # si source es una URL git+https
-   pip install "git+https://github.com/org/repo.git"
-   ```
-
-3. Verificá que tu versión de `workflow-bot-core` cumple el constraint declarado en `compatible_core` antes de habilitarlo en producción.
-
-4. Registrá el plugin según el mecanismo de entry points de `workflow-bot-core` (ver la documentación de ese repo) y confirmá que los `ports` que pide son los que esperás — son la superficie de acceso que le estás dando.
-
-No hay instalación automática ni un comando propio de este repo: es una referencia, no un gestor de paquetes.
-
-## Proponer un plugin nuevo
-
-Ver [`CONTRIBUTING.md`](./CONTRIBUTING.md). En resumen: un PR que agrega `plugins/<name>.json` validado contra `schema/plugin.schema.json`, para un plugin genérico, con tests propios y licencia clara. La curaduría final es manual (ver [`docs/curar-un-plugin.md`](./docs/curar-un-plugin.md)) — nadie mergea sin instalar el paquete propuesto y correr sus tests contra un release real de `bot-core`.
-
-## Licencia
-
-Este índice se distribuye bajo la licencia indicada en [`LICENSE`](./LICENSE). Cada plugin listado tiene su propia licencia, declarada en su entrada (`license`) y en su propio repositorio.
+| name | qué hace | ports |
+|---|---|---|
+| `archivos` | mover, copiar, eliminar, renombrar y buscar (etiqueta o regex) | fs |
+| `procesos` | saber si un programa está corriendo | process |
+| `toothform` | exportar STL con QR en ToothFORM (cmd o ventana) y leer su log; trae el release de la app en `toothform/instalador/` | process, fs, clock, window |

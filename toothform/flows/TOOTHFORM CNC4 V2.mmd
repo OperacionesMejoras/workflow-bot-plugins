@@ -1,0 +1,102 @@
+%% folder: FORM
+%% description: Busca archivos con el label "toothform", verifica que el proceso esté abierto, Agrega el QR con el Type 1, mueve la carpeta del export a la carpeta superior (parent) a donde estaban los archivos iniciales
+%%
+%% Para ToothFORM release 20260123 (sin modo línea de comandos). Con el
+%% release 20260518 o posterior, usar TOOTHFORM CNC4 V3: un solo nodo
+%% toothform.exportar en vez de la ventana, las esperas y el operador.
+%%
+%% Es Legacy/workflows/TOOTHFORM CNC4 V2.mmd portado al sistema nuevo: los
+%% xano.* son connections.llamar contra las Actions guardadas con esos mismos
+%% nombres, los windows.* son archivos.*, toothform.check_process es
+%% procesos.esta_corriendo, y add_qr/check_log son el plugin toothform.
+%%
+%% Espera tres variables que no vienen de Xano y hay que darle con la fila (o
+%% por {env.*} adaptando los nodos): toothformLogDir = la carpeta de salida de
+%% ToothFORM (FilePath en Toothform.ini); filesFolder = la carpeta con los STL
+%% del caso, con los que se compara el conteo del export; carpetaCaso = la
+%% carpeta del caso adonde se mueve el export y se copia el log (el legacy la
+%% escribía {filesFolder.parent}, que el núcleo nuevo no resuelve: {a.b} sólo
+%% recorre objetos, no rutas). Las tres tienen que caer dentro del fs_root de
+%% la instalación, si no el port fs las rechaza.
+%%
+%% Requisitos de la instalación, además del plugin toothform: en boot.env,
+%% process_allowlist=tasklist (procesos.esta_corriendo lista procesos con ese
+%% comando; el wizard lo deja vacío = ningún ejecutable, y con eso el nodo
+%% "TOOTHFORM abierto?" corta el run); el FilePath de Toothform.ini apuntando
+%% adentro del fs_root (toothformLogDir); y ToothFORM abierto SIN "ejecutar
+%% como administrador" — a una ventana elevada el Bot no la puede controlar.
+%%
+%% "Agregar QR" sale por |ok| y por |err| a la misma espera: el add_qr legacy
+%% devolvía err al vencer su propia espera y ese era su camino normal; el nuevo
+%% devuelve ok apenas clickea Export, y quien espera al resultado es check_log.
+%% Por lo mismo, "Timeout agotado" → "comentario crash" es incondicional: el
+%% webapp.log legacy con type=error devolvía err y la arista |err| lo seguía;
+%% core.log devuelve ok siempre, y con sólo |err| el run terminaba sin avisar.
+flowchart TD
+    SN(inicio)
+    N1009["refrescar row § connections.llamar_y_fusionar | connection=Refresh row"]
+    N1008{ES APTO QR? § sub_stage}
+    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, etiqueta=.stl"]
+    N1005["Comentario no hay carpeta en CASOS TERMINADOS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=BOT - No se encontraron los casos renombrados para TOOTHFORM, pais={pais}"]
+    N_cp["TOOTHFORM abierto? § procesos.esta_corriendo | ejecutable=Toothform.exe"]
+    N1["Agregar QR § toothform.add_qr | timeout=60"]
+    N37["esperar al export § core.wait | seconds=60"]
+    N_gate_proc["Gate export § flow.retry_gate | retryGateKey=processCheck, retryGateMax=50"]
+    N_wait_proc["Esperar para volver a chekear § core.wait | seconds=60"]
+    N_err_proc["TF cerrado § core.log | message=ToothFORM no está abierto luego de 5 intentos, level=error"]
+    N2["Esperar verificar log § core.wait | seconds=5"]
+    N3["Verificar log § toothform.check_log | carpeta={toothformLogDir}, max_edad=900"]
+    N5["OK - continuar § core.log | message=Export completado, level=info"]
+    N7["Timeout agotado § core.log | message=Timeout: nse realizaron todos los intentos sin exito, level=error"]
+    COMP_FILES["Comprobar cantidad § archivos.comparar_conteo | carpeta_a={toothformLogDir}\{id_externo}, carpeta_b={filesFolder}, etiqueta=toothform"]
+    ERR_COMP["Error conteo § core.log | message=Faltan archivos exportados, level=error"]
+    MF["mover a carpeta del caso § archivos.mover | origen={toothformLogDir}\{id_externo}, destino={carpetaCaso}\{id_externo}"]
+    N1003["NOLOCO - Apto impreison § connections.llamar | connection=Apto impresion"]
+    N30["Sigue ejecutando? § procesos.esta_corriendo | ejecutable=Toothform.exe"]
+    N32["Revisar log nuevamente § flow.retry_gate | retryGateKey=verifyLog, retryGateMax=5"]
+    N1000["copiar archivo § archivos.copiar | origen={toothformLogDir}\{checkLogResult.log_file}, destino={carpetaCaso}\{checkLogResult.log_file}"]
+    N1004["Revision Impresion digital § connections.llamar | connection=Revision impresion digital"]
+    N1001["comentario noloco § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto={checkLogResult.message} log: - {checkLogResult.log_file} - en carpeta del caso, pais={pais}"]
+    N1006["estatus error § core.set_status | status=err"]
+    N1007["comentario crash § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=Crasheo el toothform, pais={pais}"]
+    N1011{Es KIDS? § tratamiento_intranet}
+    N1012["COMENTARIO KIDS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=Es KIDS, pais={pais}"]
+    N1013{ES 3a3? § feston}
+    N1014["COMENTARIO FESTON 3a3 § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=ES FESTON 3 a 3, pais={pais}"]
+    SN -->N1009
+    N1009 -->N1013
+    N1008 -->|Apto QR| N29
+    N29 -->|ok| N_cp
+    N29 -->|err| N1005
+    N1005 -->N1004
+    N_cp -->|ok| N1
+    N1 -->|ok| N37
+    N1 -->|err| N37
+    N37 -->|ok| N30
+    N_gate_proc -->|ok| N_wait_proc
+    N_gate_proc -->|err| N7
+    N_wait_proc -->|ok| N30
+    N2 -->|ok| N3
+    N3 -->|ok| N5
+    N3 -->|err| N1000
+    N3 -->|loop| N32
+    N5 -->COMP_FILES
+    N7 -->N1007
+    COMP_FILES -->|ok| MF
+    COMP_FILES -->|err| ERR_COMP
+    ERR_COMP -->N1006
+    MF -->N1003
+    N30 -->|ok| N3
+    N30 -->|loop| N_gate_proc
+    N30 -->|err| N_err_proc
+    N32 -->|ok| N2
+    N32 -->|err| N7
+    N1000 -->N1001
+    N1004 -->N1006
+    N1001 -->N1004
+    N1011 -->N1008
+    N1011 -->|Kids, Kids Full, Kids Medium, Kids Fast, Kids Full RC| N1012
+    N1012 -->N1004
+    N1013 -->N1011
+    N1013 -->|Feston: De 3 a 3| N1014
+    N1014 -->N1004
