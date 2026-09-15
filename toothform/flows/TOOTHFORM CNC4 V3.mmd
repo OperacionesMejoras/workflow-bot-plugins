@@ -15,6 +15,13 @@
 %% toothformLogDir y carpetaCaso adentro del fs_root y en ASCII: ToothFORM no
 %% encuentra rutas con acentos y termina sin exportar ni dejar log.
 %%
+%% "Buscar archivos" toma sólo el STL que ToothFORM carga, con el nombre de
+%% producción (el folderSearchPatterns "toothform" de Xano: id de dos letras y
+%% tres dígitos, -L/U + dos dígitos, -letra, .stl); descarta -gum, -tooth y
+%% cualquier otro derivado. Va sin cuantificadores {n} porque el núcleo leería
+%% {2} como una variable. Un caso de prueba "QATF001" no lo cumple: para QA,
+%% nombrar el STL como en producción.
+%%
 %% Requisitos de la instalación: en boot.env, process_allowlist con el
 %% ejecutable (process_allowlist=Toothform, compara por nombre sin ruta ni
 %% extensión); el plugin toothform ≥ 0.2.0.
@@ -26,7 +33,7 @@ flowchart TD
     SN(inicio)
     N1009["refrescar row § connections.llamar_y_fusionar | connection=Refresh row"]
     N1008{ES APTO QR? § sub_stage}
-    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, etiqueta=.stl"]
+    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, patron=^[A-Z][A-Z]\d\d\d-[LU]\d\d-[A-Z]\.stl$"]
     N1005["Comentario no hay carpeta en CASOS TERMINADOS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=BOT - No se encontraron los casos renombrados para TOOTHFORM, pais={pais}"]
     EXP["Exportar en ToothFORM § toothform.exportar | ejecutable={toothformExe}, carpeta={filesFolder}, salida={toothformLogDir}, tipo=Type1, timeout=900"]
     N5["OK - continuar § core.log | message=Export completado, level=info"]

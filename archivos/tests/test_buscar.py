@@ -56,6 +56,31 @@ def test_por_patron_distingue_el_modelo_de_sus_derivados():
     ]
 
 
+def test_el_patron_de_los_flujos_toothform_es_el_nombre_legacy_del_stl():
+    # El legacy (folderSearchPatterns, label "toothform") aceptaba ext .stl y
+    # stem ^(?P<id>[A-Z]{2}\d{3})-(?P<maxilla>[LU])(?P<movement>\d{2})-(?P<type>[A-Z])$.
+    # En el .mmd va sin llaves ({2} se leería como variable) y con la extensión adentro.
+    patron = r"^[A-Z][A-Z]\d\d\d-[LU]\d\d-[A-Z]\.stl$"
+    archivos = {
+        f"{CASO}/AB123-L01-A.stl": "", f"{CASO}/AB123-U12-B.STL": "",
+        f"{CASO}/AB123-L01-A-gum.stl": "", f"{CASO}/QATF001-L01-A.stl": "",
+        f"{CASO}/AB1234-L01-A.stl": "", f"{CASO}/AB123-L1-A.stl": "",
+    }
+    reg = ToolRegistry(adapters={"fs": FakeFs(files=archivos)})
+    reg._add_plugin("archivos", "plugins.archivos:PLUGIN", build_plugin())
+
+    def factory(declaracion, ports=None):
+        declarados, extras = declaracion.split_params({"carpeta": CASO, "patron": patron}, {})
+        return ToolContext(
+            run_id="run-test", case_id="AB123", params=declarados, extras=extras,
+            config={}, context={}, log=lambda *_a, **_k: None, ports=ports or {},
+        )
+
+    r = reg.execute("archivos.buscar", factory)
+    assert r.status == "ok"
+    assert sorted(pathlib.Path(p).name for p in r.outputs["rutas"]) == ["AB123-L01-A.stl", "AB123-U12-B.STL"]
+
+
 def test_etiqueta_y_patron_se_combinan():
     r = _buscar(etiqueta="QATF001", patron=r"-L\d{2}-")
     assert r.status == "ok"

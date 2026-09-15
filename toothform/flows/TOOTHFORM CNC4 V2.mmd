@@ -36,7 +36,7 @@ flowchart TD
     SN(inicio)
     N1009["refrescar row § connections.llamar_y_fusionar | connection=Refresh row"]
     N1008{ES APTO QR? § sub_stage}
-    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, etiqueta=.stl"]
+    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, patron=^[A-Z][A-Z]\d\d\d-[LU]\d\d-[A-Z]\.stl$"]
     N1005["Comentario no hay carpeta en CASOS TERMINADOS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=BOT - No se encontraron los casos renombrados para TOOTHFORM, pais={pais}"]
     N_cp["TOOTHFORM abierto? § procesos.esta_corriendo | ejecutable=Toothform.exe"]
     N1["Agregar QR § toothform.add_qr | timeout=60"]
