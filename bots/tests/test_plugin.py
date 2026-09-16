@@ -176,3 +176,14 @@ def test_la_accion_probar_resume_el_estado():
 
     r = reg.execute_action("bots", "probar", factory)
     assert r.status == "ok" and r.message == "responde · 0 en vuelo · último run ok"
+
+
+def test_correr_acepta_row_como_texto_interpolado_por_el_nucleo():
+    """`row={variable}` llega como str(dict) de Python, con comillas simples: no es JSON, y también sirve."""
+    http = FakeHttp({f"{API2}/runs": _json({"ticket": "t9", "estado": "en_cola"})})
+    fila = "{'id_externo': 'AB123', 'filesFolder': 'C:\\casos\\AB123\\stl'}"
+    r, _ = _correr("bots.correr", {"bot": "Impresión 2", "flujo": "f", "case_id": "AB123", "row": fila}, http)
+    assert r.status == "ok"
+    assert json.loads(http.calls[0]["body"])["row"] == {"id_externo": "AB123", "filesFolder": "C:\casos\AB123\stl"}
+    r, _ = _correr("bots.correr", {"bot": "Impresión 2", "flujo": "f", "case_id": "1", "row": "no es un objeto"}, FakeHttp())
+    assert r.status == "err" and "objeto JSON" in r.message

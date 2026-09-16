@@ -32,6 +32,7 @@ campo "asignado a" que se escribe una sola vez). Ver el README.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 
@@ -113,6 +114,27 @@ def _bot(ctx: ToolContext, nombre: str):
     if not _URL_VALIDA.match(url):
         return ToolResult.err(f"la dirección de '{nombre}' no es http://ip:puerto: {url!r}")
     return {**bot, "url": url}
+
+
+def _como_objeto(valor) -> dict | None:
+    """
+    `row` como dict. Vacío es {}. Si viene como texto —un `row={variable}` que
+    el núcleo interpoló: str(dict), con comillas simples de Python, o JSON—
+    se parsea. None si no es un objeto.
+    """
+    if valor is None or valor == "":
+        return {}
+    if isinstance(valor, dict):
+        return valor
+    if isinstance(valor, str):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parseado = parser(valor)
+            except (ValueError, SyntaxError):
+                continue
+            if isinstance(parseado, dict):
+                return parseado
+    return None
 
 
 def _timeout(ctx: ToolContext) -> float:
@@ -258,9 +280,9 @@ def _correr(ctx: ToolContext) -> ToolResult:
     if isinstance(bot, ToolResult):
         return bot
     case_id = str(ctx.params["case_id"]).strip()
-    row = ctx.params.get("row") or {}
-    if not isinstance(row, dict):
-        return ToolResult.err("'row' tiene que ser un objeto JSON")
+    row = _como_objeto(ctx.params.get("row"))
+    if row is None:
+        return ToolResult.err("'row' tiene que ser un objeto JSON (o una {variable} que contenga uno)")
     cuerpo = {
         "flow": ctx.params["flujo"], "case_id": case_id,
         "row": row or {"id_externo": case_id},
