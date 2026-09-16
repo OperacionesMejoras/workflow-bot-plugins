@@ -25,6 +25,18 @@ from backend.tests.fakes import FakeFs  # noqa: E402
 
 from plugins.convertidor.plugin import build_plugin  # noqa: E402
 
+
+def test_el_paquete_expone_plugin_como_lo_busca_el_nucleo():
+    # backend/core/instance.py:_plugins_de_la_carpeta arma "convertidor:PLUGIN"
+    # e importa el paquete raíz, no el submódulo plugin.py — un __init__.py
+    # vacío (como pasó una vez) rompe esto sin que import plugins.convertidor.plugin
+    # lo note, porque ese import bypasea el __init__.py del paquete.
+    import plugins.convertidor as paquete
+
+    assert hasattr(paquete, "PLUGIN"), "convertidor/__init__.py tiene que re-exportar PLUGIN"
+    assert paquete.PLUGIN.manifest.name == "convertidor"
+
+
 # Los mismos dos patrones que traía `patterns.py` del Convertidor original.
 PATRONES_TOOTHFORM = {
     "standard": r"(?P<id>\S+)\s+(?P<patient>.+?)\s+(?P<stage>\d+\.\d+)\s+(?P<maxilla>Inf|Sup)\s+(?P<movement>\d+)",

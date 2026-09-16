@@ -1,0 +1,20 @@
+# Curado contra runtime-release.json de workflow-bot-app v0.4.2-beta.1
+# (Python 3.12.14, win_amd64). Ver EasyIndustry/workflow-bot-plugins#1 y
+# EasyIndustry/workflow-bot-core#20 para la convención.
+#
+# Los hashes se generaron acá, bajando cada wheel de PyPI con:
+#   pip download --only-binary :all: --platform win_amd64 \
+#       --python-version 3.12 --implementation cp --abi cp312 \
+#       numpy trimesh rtree scipy
+#   pip hash *.whl
+# Nunca se toman de un hash provisto por otra fuente: eso solo garantizaría
+# que la wheel no cambió después, no que sea la correcta.
+#
+# Cadena de dependencias completa (revisada en el METADATA de cada wheel):
+# numpy y rtree no dependen de nada más; scipy y trimesh solo de numpy.
+# Cuatro líneas, nada transitivo faltante.
+
+numpy==2.5.3 --hash=sha256:0a59a421a32580a009e8a1751345bf829631b990dc1794b80514ab722b435def
+scipy==1.18.1 --hash=sha256:5e4d44984abc0020154ea81b247adeddcc3ac5527b975ff798bd1ba0adc513c2
+rtree==1.4.1 --hash=sha256:efe125f416fd27150197ab8521158662943a40f87acab8028a1aac4ad667a489
+trimesh==5.1.0 --hash=sha256:0fa85d1d131e321b683c00747c20090200b92071298b905ea588f609eb204c89
