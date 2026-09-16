@@ -78,6 +78,10 @@ def _corregir(fs, **params):
     return _registry(adapters={"fs": fs}).execute("convertidor.corregir_puntos", _factory(params))
 
 
+def _inspeccionar(fs, **params):
+    return _registry(adapters={"fs": fs}).execute("convertidor.inspeccionar_malla", _factory(params))
+
+
 def _aplicar_expr(plantillas=(), **params):
     return _registry().execute("convertidor.aplicar_expresiones", _factory(params, plantillas))
 
@@ -247,7 +251,7 @@ def test_parsear_pts_archivo_inexistente_es_err():
     assert r.status == "err"
 
 
-# ── corregir_puntos ─────────────────────────────────────────────────────
+# ── corregir_puntos / inspeccionar_malla ─────────────────────────────────
 
 # Un solo triángulo en el plano XY (z=0): (0,0,0), (1,0,0), (0,1,0).
 STL_TRIANGULO = """
@@ -261,6 +265,60 @@ facet normal 0 0 1
 endfacet
 endsolid test
 """.strip("\n")
+
+# Dos triángulos que no comparten ningún vértice: dos volúmenes desconectados
+# (el caso que el "Inspector de Mallas" original marcaba en rojo).
+STL_DOS_VOLUMENES = """
+solid test
+facet normal 0 0 1
+ outer loop
+  vertex 0 0 0
+  vertex 1 0 0
+  vertex 0 1 0
+ endloop
+endfacet
+facet normal 0 0 1
+ outer loop
+  vertex 10 0 0
+  vertex 11 0 0
+  vertex 10 1 0
+ endloop
+endfacet
+endsolid test
+""".strip("\n")
+
+
+def test_inspeccionar_malla_de_un_solo_volumen():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRIANGULO})
+    r = _inspeccionar(fs, stl="D:/malla.stl")
+    assert r.status == "ok"
+    assert r.outputs["volumenes"] == 1
+    assert r.outputs["es_multivolumen"] is False
+    assert r.outputs["partes"] == [{"caras": 1, "vertices": 3}]
+
+
+def test_inspeccionar_malla_multivolumen():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_DOS_VOLUMENES})
+    r = _inspeccionar(fs, stl="D:/malla.stl")
+    assert r.status == "ok"
+    assert r.outputs["volumenes"] == 2
+    assert r.outputs["es_multivolumen"] is True
+    assert len(r.outputs["partes"]) == 2
+
+
+def test_inspeccionar_malla_sin_trimesh_instalado_es_err_claro(monkeypatch):
+    monkeypatch.setitem(sys.modules, "trimesh", None)
+    fs = FakeFs(files={"D:/malla.stl": STL_TRIANGULO})
+    r = _inspeccionar(fs, stl="D:/malla.stl")
+    assert r.status == "err"
+    assert "trimesh" in r.message
+
+
+def test_inspeccionar_malla_archivo_inexistente_es_err():
+    r = _inspeccionar(FakeFs(), stl="D:/no-existe.stl")
+    assert r.status == "err"
 
 
 def test_corregir_puntos_sin_trimesh_instalado_es_err_claro(monkeypatch):

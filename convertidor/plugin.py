@@ -32,14 +32,19 @@ entero tiene que poder cargar igual —sólo ese tool falla, con un mensaje
 claro— en vez de tumbar `parsear_nombre`/`generar_nombre`/`reescribir_archivo`
 que no las necesitan.
 
-Esto es un parche a propósito, no la forma final: un plugin no debería
-importar una librería externa (`backend/README.md` del core lo dice
-explícito), pero hoy no existe el port que lo evite. Ver
-https://github.com/EasyIndustry/workflow-bot-core/issues/19 — cuando el core
-sume el port `geometry` (con `numpy` como dependencia propia y un adapter
-"curado" para trimesh detrás de `available`), este tool pasa a pedir
-`ctx.port("geometry")` en vez de importar trimesh directo, y el import
-perezoso de acá se saca.
+En un venv real (`.venv` de este repo, no commiteado) `trimesh.nearest.on_surface`
+además pide `rtree` y `scipy` en tiempo de ejecución —no alcanza con
+numpy/trimesh solos—, así que el `requirements.txt` final de este tool va a
+tener que declarar los cuatro. Esto es un parche a propósito, no la forma
+final: un plugin no debería importar una librería externa sin declararla
+(`backend/README.md` del core lo dice explícito), pero hoy el instalador de
+plugins no resuelve dependencias. Ver
+https://github.com/EasyIndustry/workflow-bot-plugins/issues/1 (convención del
+catálogo: `requirements.txt` con hashes + `compatible_runtime`) y
+https://github.com/EasyIndustry/workflow-bot-core/issues/20 (la regla del
+lado del núcleo) — cuando la app publique el runtime versionado y el
+instalador honre `requirements.txt`, este archivo se suma y el import
+perezoso queda solo como red de seguridad para instalaciones viejas.
 
 `aplicar_expresiones` porta el lenguaje del "Gestor de Expresiones" original
 (`utils/expressions.py`, `ExpressionEvaluator`) — IF/IFS/SET/UPPER/LOWER sobre
@@ -392,6 +397,54 @@ def _parsear_pts(ctx: ToolContext) -> ToolResult:
     return ToolResult.ok(secciones=secciones, cantidad=len(secciones))
 
 
+# ── inspeccionar_malla ──────────────────────────────────────────────────
+
+INSPECCIONAR_MALLA = ToolManifest(
+    id="convertidor.inspeccionar_malla",
+    label="inspeccionar malla",
+    category="CONVERTIDOR",
+    doc=(
+        "Carga 'stl' y cuenta cuántos volúmenes (partes desconectadas) tiene, "
+        "sin decidir nada por su cuenta —a diferencia de 'corregir puntos', que "
+        "ya elige la más grande salvo 'toda_la_malla'—. Es el paso previo para "
+        "que el flujo (o quien lo revise) decida qué hacer con un STL "
+        "multi-volumen, igual que el diálogo 'Inspector de Mallas' del "
+        "Convertidor original pero sin la ventana 3D: acá la decisión la toma "
+        "quien arma el flujo, mirando 'volumenes'/'partes'. Requiere 'trimesh' "
+        "y 'numpy' instalados en el entorno de bot-core."
+    ),
+    params=(Param("stl", ParamType.PATH, required=True),),
+    outputs=(
+        Output("volumenes", ParamType.INT, doc="Cuántas partes desconectadas tiene la malla."),
+        Output("es_multivolumen", ParamType.BOOL),
+        Output("partes", ParamType.JSON, doc="Lista de {caras, vertices} por cada parte, en el mismo orden que trimesh.split()."),
+    ),
+)
+
+
+def _inspeccionar_malla(ctx: ToolContext) -> ToolResult:
+    try:
+        import numpy  # noqa: F401 — dependencia de trimesh, falla antes de intentar cargar la malla si no está
+        import trimesh
+    except ImportError as exc:
+        return ToolResult.err(f"falta instalar 'trimesh' y 'numpy' en el entorno de bot-core para usar este tool ({exc})")
+
+    fs = ctx.port(port_names.FS)
+    ruta_stl = ctx.params["stl"]
+    if not fs.exists(ruta_stl) or fs.is_dir(ruta_stl):
+        return ToolResult.err(f"no existe el archivo: {ruta_stl}")
+
+    try:
+        malla = trimesh.load(io.BytesIO(fs.read_bytes(ruta_stl)), file_type="stl", force="mesh")
+    except Exception as exc:
+        return ToolResult.err(f"no se pudo leer la malla de '{ruta_stl}': {exc}")
+
+    partes = malla.split(only_watertight=False)
+    resumen = [{"caras": len(p.faces), "vertices": len(p.vertices)} for p in partes]
+    ctx.log(f"{ruta_stl}: {len(partes)} volumen(es)")
+    return ToolResult.ok(volumenes=len(partes), es_multivolumen=len(partes) > 1, partes=resumen)
+
+
 # ── corregir_puntos ─────────────────────────────────────────────────────
 
 CORREGIR_PUNTOS = ToolManifest(
@@ -424,10 +477,12 @@ CORREGIR_PUNTOS = ToolManifest(
 def _corregir_puntos(ctx: ToolContext) -> ToolResult:
     try:
         import numpy as np
+        import rtree  # noqa: F401 — trimesh.nearest.on_surface lo pide en runtime, sin avisar hasta usarlo
+        import scipy  # noqa: F401 — ídem
         import trimesh
     except ImportError as exc:
         return ToolResult.err(
-            f"falta instalar 'trimesh' y 'numpy' en el entorno de bot-core para usar este tool ({exc})"
+            f"falta instalar 'trimesh', 'numpy', 'rtree' y 'scipy' en el entorno de bot-core para usar este tool ({exc})"
         )
 
     fs = ctx.port(port_names.FS)
@@ -648,6 +703,7 @@ _TOOLS = (
     (GENERAR_NOMBRE, _generar_nombre),
     (REESCRIBIR_ARCHIVO, _reescribir_archivo),
     (PARSEAR_PTS, _parsear_pts),
+    (INSPECCIONAR_MALLA, _inspeccionar_malla),
     (CORREGIR_PUNTOS, _corregir_puntos),
     (APLICAR_EXPRESIONES, _aplicar_expresiones),
 )
