@@ -1,0 +1,13 @@
+{
+  "name": "convertidor",
+  "description": "Probar patrones regex con named groups sobre nombres de archivo y reescribirlos (nombre y carpeta) con un template, contra el port fs.",
+  "source": "workflow-bot-plugin-convertidor",
+  "path": "convertidor",
+  "ports": [
+    "fs"
+  ],
+  "maintainer": "OperacionesMejoras",
+  "repo_url": "https://github.com/OperacionesMejoras/workflow-bot-plugins",
+  "compatible_core": ">=0.3.0b4",
+  "license": "MIT"
+}
