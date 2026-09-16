@@ -98,8 +98,11 @@ PLANTILLAS = Resource(
         "usa los campos de acá para lo que no vino explícito en sus propios "
         "params — un param explícito siempre gana."
     ),
+    # "nombre" no va acá: es key_field, y la UI ya arma su propio campo para
+    # la clave (con label y doc fijos) — declararlo también en fields duplica
+    # el campo en el formulario (dibujarItem/crearFormulario en plugins.js no
+    # dedupea). Mismo problema que tiene bots.BOTS, no reproducido acá.
     fields=(
-        Field("nombre", ParamType.STR, label="Nombre", required=True, doc="Como la referencian los flujos, ej. 'toothform-legacy'."),
         Field("patrones", ParamType.JSON, label="Patrones", doc="Igual que el param 'patrones' de 'parsear nombre' / 'reescribir archivo'."),
         Field("template_nombre", ParamType.STR, label="Template de nombre", doc="Igual que 'template' de 'generar nombre' o 'template_nombre' de 'reescribir archivo'."),
         Field("template_carpeta", ParamType.STR, label="Template de carpeta", doc="Igual que 'template_carpeta' de 'reescribir archivo'."),
