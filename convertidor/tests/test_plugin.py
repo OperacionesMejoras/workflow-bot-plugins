@@ -217,6 +217,91 @@ def test_reescribir_archivo_sin_match_es_err_y_no_copia_nada():
     assert list(fs.files) == [origen]
 
 
+# El caso real que dejó armado Leandro para probar en el Bot del 8000.
+PATRON_CNC3 = {
+    "principal": r"(?P<id_externo>AP\d+)\s+(?P<nombre>[A-Za-z\s]+?)\s+\d+\.\d+\s+(?P<maxilar>Inf|Sup)\s+(?P<movimiento>\d+)\s+CNC\d+",
+}
+EXPRESIONES_CNC3 = [
+    'IF(LOWER({maxilar})="inf", {maxilar}:"L", SET({maxilar}, "U"))',
+    'IF({movimiento}="00", {type}:"B", {type}:"A")',
+]
+
+
+def test_reescribir_archivo_aplica_expresiones_antes_de_armar_el_nombre():
+    origen = "C:/casos/AP962 Leandro Martinez 1.0 Inf 00 CNC2.stl"
+    fs = FakeFs(files={origen: "x"})
+    r = _reescribir(
+        fs, origen=origen, carpeta_salida="D:/export", patrones=PATRON_CNC3,
+        expresiones=EXPRESIONES_CNC3, template_nombre="{id_externo}-{maxilar}{movimiento}-{type}",
+    )
+    assert r.status == "ok"
+    # maxilar "Inf" -> "L" y type "B" (movimiento "00") vienen de las
+    # expresiones, no del regex: si reescribir_archivo no las aplicara, el
+    # nombre saldría con el "Inf" crudo y sin "type" (KeyError).
+    assert r.outputs["ruta"] == "D:/export/AP962-L00-B.stl"
+
+
+def test_reescribir_archivo_con_expresion_invalida_es_err():
+    origen = "C:/casos/AP962 Leandro Martinez 1.0 Inf 00 CNC2.stl"
+    fs = FakeFs(files={origen: "x"})
+    r = _reescribir(
+        fs, origen=origen, carpeta_salida="D:/export", patrones=PATRON_CNC3,
+        expresiones=["ESTO_NO_EXISTE({x})"], template_nombre="{id_externo}",
+    )
+    assert r.status == "err"
+    assert "ESTO_NO_EXISTE" in r.message
+    assert list(fs.files) == [origen]  # no llegó a copiar nada
+
+
+# ── reescribir_archivos (batch) ──────────────────────────────────────────
+
+def _reescribir_varios(fs, plantillas=(), **params):
+    return _registry(adapters={"fs": fs}).execute(
+        "convertidor.reescribir_archivos", _factory(params, plantillas),
+    )
+
+
+def test_reescribir_archivos_procesa_todas_las_rutas():
+    archivos = {
+        "C:/casos/AP962 Leandro Martinez 1.0 Inf 00 CNC2.stl": "x",
+        "C:/casos/AP962 Leandro Martinez 1.0 Sup 05 CNC2.stl": "x",
+    }
+    fs = FakeFs(files=archivos)
+    r = _reescribir_varios(
+        fs, rutas=list(archivos), carpeta_salida="D:/export", patrones=PATRON_CNC3,
+        expresiones=EXPRESIONES_CNC3, template_nombre="{id_externo}-{maxilar}{movimiento}-{type}",
+    )
+    assert r.status == "ok"
+    assert r.outputs["procesados"] == 2
+    assert r.outputs["fallidos"] == 0
+    assert r.outputs["rutas_fallidas"] == []
+    rutas_nuevas = {res["ruta"] for res in r.outputs["resultados"]}
+    assert rutas_nuevas == {"D:/export/AP962-L00-B.stl", "D:/export/AP962-U05-A.stl"}
+
+
+def test_reescribir_archivos_sigue_con_el_resto_si_uno_falla():
+    archivos = {
+        "C:/casos/AP962 Leandro Martinez 1.0 Inf 00 CNC2.stl": "x",
+        "C:/casos/no-matchea-nada.stl": "x",
+    }
+    fs = FakeFs(files=archivos)
+    r = _reescribir_varios(
+        fs, rutas=list(archivos), carpeta_salida="D:/export", patrones=PATRON_CNC3,
+        expresiones=EXPRESIONES_CNC3, template_nombre="{id_externo}-{maxilar}{movimiento}-{type}",
+    )
+    assert r.status == "err"
+    assert r.outputs["procesados"] == 1
+    assert r.outputs["fallidos"] == 1
+    assert r.outputs["rutas_fallidas"] == ["C:/casos/no-matchea-nada.stl"]
+    # el que sí matcheaba se copió igual, no lo frenó la falla del otro
+    assert fs.files.get("D:/export/AP962-L00-B.stl") == "x"
+
+
+def test_reescribir_archivos_rutas_vacio_es_err():
+    r = _reescribir_varios(FakeFs(), rutas=[], carpeta_salida="D:/export", patrones=PATRON_CNC3, template_nombre="{id_externo}")
+    assert r.status == "err"
+
+
 def test_parsear_y_generar_encadenados_toothform_a_legacy():
     parseo = _parsear(nombre="AP962 Leandro Martinez 1.0 Inf 00 CNC2.stl", patrones=PATRONES_TOOTHFORM)
     assert parseo.status == "ok"
@@ -491,14 +576,16 @@ def test_generar_nombre_usa_el_template_de_la_plantilla():
     assert r.outputs["nombre_nuevo"] == "AB123_L01_A"
 
 
-def test_reescribir_archivo_usa_patrones_y_templates_de_la_plantilla():
+def test_reescribir_archivo_usa_patrones_templates_y_expresiones_de_la_plantilla():
     origen = "C:/casos/AB123-L01-A.stl"
     fs = FakeFs(files={origen: "x"})
     r = _reescribir(
         fs, origen=origen, carpeta_salida="D:/export", plantillas=[PLANTILLA_LEGACY], plantilla="legacy",
     )
     assert r.status == "ok"
-    assert r.outputs["ruta"] == "D:/export/AB123/AB123_L01_A.stl"
+    # PLANTILLA_LEGACY trae expresiones=['SET({type}, "X")']: el "type"="A" que
+    # sacó el regex queda pisado por la expresión antes de armar el nombre.
+    assert r.outputs["ruta"] == "D:/export/AB123/AB123_L01_X.stl"
 
 
 def test_aplicar_expresiones_usa_las_de_la_plantilla():

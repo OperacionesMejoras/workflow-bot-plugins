@@ -17,9 +17,20 @@ carpeta destino, validar un campo) antes de armar el nombre final.
 
 `reescribir_archivo` es el camino corto para el caso típico —un archivo real
 entra, sale copiado con nombre (y opcionalmente carpeta) nuevos— y sí necesita
-`fs`. Comparte con las dos anteriores los mismos helpers de parseo/template,
-para no tener dos implementaciones de "probar patrones" o "aplicar template"
-que puedan divergir.
+`fs`. A diferencia de encadenar `parsear_nombre` → `aplicar_expresiones` →
+`generar_nombre` como tres nodos, acá las tres etapas viven en un solo tool
+(`_reescribir_uno`) para el caso simple: parsea, aplica `expresiones` sobre
+las variables extraídas, y recién ahí arma el nombre — si el paso de
+expresiones se salteara, una plantilla con reglas de transformación (ej.
+`maxilla` → `L`/`U`) nunca se aplicaría al usar este tool directo.
+
+`reescribir_archivos` (plural) es la misma lógica para muchos archivos en un
+solo llamado, con `_reescribir_uno` reusado por archivo: hace falta porque el
+motor de flujos no tiene un nodo "por cada elemento de un array" (un run es
+una fila/caso, no una colección), así que procesar lo que devuelve
+`archivos.buscar` de a uno necesitaría un run por archivo. No corta al primer
+error — seguir con el resto y juntar un resumen es más útil que perder toda
+una tanda por un archivo con un nombre raro.
 
 `parsear_pts` y `corregir_puntos` son el mapeo geométrico de
 `utils/geometry.py` y `utils/parser.py` (parse_pts_file) del Convertidor
@@ -106,7 +117,7 @@ PLANTILLAS = Resource(
         Field("patrones", ParamType.JSON, label="Patrones", doc="Igual que el param 'patrones' de 'parsear nombre' / 'reescribir archivo'."),
         Field("template_nombre", ParamType.STR, label="Template de nombre", doc="Igual que 'template' de 'generar nombre' o 'template_nombre' de 'reescribir archivo'."),
         Field("template_carpeta", ParamType.STR, label="Template de carpeta", doc="Igual que 'template_carpeta' de 'reescribir archivo'."),
-        Field("expresiones", ParamType.JSON, label="Expresiones", doc="Igual que el param 'expresiones' de 'aplicar expresiones'."),
+        Field("expresiones", ParamType.JSON, label="Expresiones", doc="Igual que el param 'expresiones' de 'aplicar expresiones' (también las usan 'reescribir archivo(s)')."),
     ),
 )
 
@@ -266,17 +277,21 @@ REESCRIBIR_ARCHIVO = ToolManifest(
     category="CONVERTIDOR",
     doc=(
         "Copia 'origen' a 'carpeta_salida' con nombre nuevo: prueba 'patrones' "
-        "contra el nombre de 'origen' (misma lógica que 'parsear nombre'), y con "
-        "las variables que salgan arma el nombre con 'template_nombre' (la "
-        "extensión se conserva) y, si se da 'template_carpeta', una subcarpeta "
-        "dentro de 'carpeta_salida'. El origen queda intacto. Lo que no venga "
-        "explícito ('patrones', 'template_nombre', 'template_carpeta') se toma "
-        "de 'plantilla' si se dio una."
+        "contra el nombre de 'origen' (misma lógica que 'parsear nombre'), les "
+        "aplica 'expresiones' (mismo lenguaje que 'aplicar expresiones' — así "
+        "una plantilla con reglas de transformación también se usa acá, no "
+        "sólo llamando a esa tool aparte), y con el resultado arma el nombre "
+        "con 'template_nombre' (la extensión se conserva) y, si se da "
+        "'template_carpeta', una subcarpeta dentro de 'carpeta_salida'. El "
+        "origen queda intacto. Lo que no venga explícito ('patrones', "
+        "'expresiones', 'template_nombre', 'template_carpeta') se toma de "
+        "'plantilla' si se dio una."
     ),
     params=(
         Param("origen", ParamType.PATH, required=True),
         Param("carpeta_salida", ParamType.PATH, required=True),
         Param("patrones", ParamType.JSON, default={}, doc="Igual que en 'parsear nombre': {clave: regex}, probados en orden."),
+        Param("expresiones", ParamType.JSON, default=[], doc="Igual que en 'aplicar expresiones': se aplican a las variables extraídas antes de armar el nombre."),
         Param("template_nombre", default="", doc="Ej. '{id}-{maxilla}{movement}-{type}', sin extensión."),
         Param("template_carpeta", default="", doc="Opcional: subcarpeta dentro de 'carpeta_salida', armada con el mismo template."),
         _PARAM_PLANTILLA,
@@ -284,61 +299,182 @@ REESCRIBIR_ARCHIVO = ToolManifest(
     outputs=(
         Output("ruta", ParamType.PATH, doc="Ruta final del archivo copiado."),
         Output("patron", ParamType.STR),
-        Output("variables", ParamType.JSON),
+        Output("variables", ParamType.JSON, doc="Ya con las expresiones aplicadas."),
         Output("nombre_nuevo", ParamType.STR),
     ),
 )
 
 
-def _reescribir_archivo(ctx: ToolContext) -> ToolResult:
-    fs = ctx.port(port_names.FS)
-    origen = ctx.params["origen"]
+def _reescribir_uno(
+    fs, origen: str, carpeta_salida: str, patrones: dict, expresiones: list, template_nombre: str, template_carpeta: str,
+) -> dict:
+    """
+    Un archivo: {ok, ruta, patron, variables, nombre_nuevo, error}. Nunca
+    levanta — todo error queda en 'error' con 'ok'=False, para que quien
+    procesa muchos (reescribir_archivos) pueda seguir con el resto.
+    """
+    resultado = {"ok": False, "ruta": "", "patron": "", "variables": {}, "nombre_nuevo": "", "error": ""}
     if not fs.exists(origen) or fs.is_dir(origen):
-        return ToolResult.err(f"no existe el archivo: {origen}")
+        resultado["error"] = f"no existe el archivo: {origen}"
+        return resultado
+
+    base, ext = os.path.splitext(fs.basename(origen))
+    try:
+        encontrado = _probar_patrones(base, patrones)
+    except re.error as exc:
+        resultado["error"] = f"regex inválida en 'patrones' ({exc})"
+        return resultado
+    if encontrado is None:
+        resultado["error"] = f"ningún patrón de {', '.join(patrones)} matchea '{base}'"
+        return resultado
+    patron, variables = encontrado
+
+    errores_expr = []
+    for expresion in expresiones:
+        try:
+            _evaluar_expresion(expresion, variables)
+        except Exception as exc:  # una regla rota no debería tumbar el resto de las expresiones
+            errores_expr.append(f"{expresion}: {exc}")
+    if errores_expr:
+        resultado["error"] = f"{len(errores_expr)} expresión(es) no se pudieron evaluar: {'; '.join(errores_expr)}"
+        resultado["variables"] = variables
+        return resultado
+
+    try:
+        nombre_nuevo = _aplicar_template(template_nombre, variables) + ext
+    except KeyError as exc:
+        resultado["error"] = f"'template_nombre' pide {exc}, ausente en las variables extraídas ({', '.join(variables)})"
+        return resultado
+    except (IndexError, ValueError) as exc:
+        resultado["error"] = f"'template_nombre' inválido: {exc}"
+        return resultado
+
+    carpeta_destino = carpeta_salida
+    if template_carpeta:
+        try:
+            subcarpeta = _aplicar_template(template_carpeta, variables)
+        except KeyError as exc:
+            resultado["error"] = f"'template_carpeta' pide {exc}, ausente en las variables extraídas ({', '.join(variables)})"
+            return resultado
+        except (IndexError, ValueError) as exc:
+            resultado["error"] = f"'template_carpeta' inválido: {exc}"
+            return resultado
+        carpeta_destino = fs.join(carpeta_destino, subcarpeta)
+
+    fs.make_dirs(carpeta_destino)
+    ruta = fs.copy_file(origen, fs.join(carpeta_destino, nombre_nuevo))
+    resultado.update(ok=True, ruta=ruta, patron=patron, variables=variables, nombre_nuevo=nombre_nuevo)
+    return resultado
+
+
+def _resolver_comunes(ctx: ToolContext) -> tuple[dict, list, str, str] | ToolResult:
+    """patrones/expresiones/template_nombre/template_carpeta ya resueltos contra 'plantilla', o el ToolResult.err para devolver tal cual."""
     patrones, error = _de_plantilla(ctx, ctx.params["patrones"], "patrones")
     if error:
         return ToolResult.err(error)
     if not patrones:
         return ToolResult.err("'patrones' vacío: no hay nada para probar (ni param ni 'plantilla')")
 
-    base, ext = os.path.splitext(fs.basename(origen))
-    try:
-        resultado = _probar_patrones(base, patrones)
-    except re.error as exc:
-        return ToolResult.err(f"regex inválida en 'patrones' ({exc})")
-    if resultado is None:
-        return ToolResult.err(f"ningún patrón de {', '.join(patrones)} matchea '{base}'")
-    patron, variables = resultado
+    expresiones, error = _de_plantilla(ctx, ctx.params["expresiones"], "expresiones")
+    if error:
+        return ToolResult.err(error)
+    expresiones = expresiones or []
 
     template_nombre, error = _de_plantilla(ctx, ctx.params["template_nombre"].strip(), "template_nombre")
     if error:
         return ToolResult.err(error)
     if not template_nombre:
         return ToolResult.err("'template_nombre' vacío (ni param ni 'plantilla')")
-    try:
-        nombre_nuevo = _aplicar_template(template_nombre, variables) + ext
-    except KeyError as exc:
-        return ToolResult.err(f"'template_nombre' pide {exc}, ausente en las variables extraídas ({', '.join(variables)})")
-    except (IndexError, ValueError) as exc:
-        return ToolResult.err(f"'template_nombre' inválido: {exc}")
 
-    carpeta_destino = ctx.params["carpeta_salida"]
     template_carpeta, error = _de_plantilla(ctx, ctx.params["template_carpeta"].strip(), "template_carpeta")
     if error:
         return ToolResult.err(error)
-    if template_carpeta:
-        try:
-            subcarpeta = _aplicar_template(template_carpeta, variables)
-        except KeyError as exc:
-            return ToolResult.err(f"'template_carpeta' pide {exc}, ausente en las variables extraídas ({', '.join(variables)})")
-        except (IndexError, ValueError) as exc:
-            return ToolResult.err(f"'template_carpeta' inválido: {exc}")
-        carpeta_destino = fs.join(carpeta_destino, subcarpeta)
 
-    fs.make_dirs(carpeta_destino)
-    ruta = fs.copy_file(origen, fs.join(carpeta_destino, nombre_nuevo))
-    ctx.log(f"{origen} -> {ruta} (patrón '{patron}')")
-    return ToolResult.ok(ruta=ruta, patron=patron, variables=variables, nombre_nuevo=nombre_nuevo)
+    return patrones, expresiones, template_nombre, template_carpeta
+
+
+def _reescribir_archivo(ctx: ToolContext) -> ToolResult:
+    fs = ctx.port(port_names.FS)
+    comunes = _resolver_comunes(ctx)
+    if isinstance(comunes, ToolResult):
+        return comunes
+    patrones, expresiones, template_nombre, template_carpeta = comunes
+
+    origen = ctx.params["origen"]
+    resultado = _reescribir_uno(fs, origen, ctx.params["carpeta_salida"], patrones, expresiones, template_nombre, template_carpeta)
+    if not resultado["ok"]:
+        return ToolResult.err(resultado["error"], variables=resultado["variables"])
+    ctx.log(f"{origen} -> {resultado['ruta']} (patrón '{resultado['patron']}')")
+    return ToolResult.ok(
+        ruta=resultado["ruta"], patron=resultado["patron"],
+        variables=resultado["variables"], nombre_nuevo=resultado["nombre_nuevo"],
+    )
+
+
+# ── reescribir_archivos (batch) ──────────────────────────────────────────
+
+REESCRIBIR_ARCHIVOS = ToolManifest(
+    id="convertidor.reescribir_archivos",
+    label="reescribir archivos (varios)",
+    category="CONVERTIDOR",
+    doc=(
+        "Como 'reescribir archivo', pero para varios a la vez: procesa cada "
+        "ruta de 'rutas' contra la misma 'carpeta_salida', 'patrones', "
+        "'expresiones' y templates, y no corta al primer error — sigue con "
+        "el resto y junta todo en 'resultados'. Es la forma de procesar lo "
+        "que devuelve 'archivos.buscar' en un solo llamado: el motor de "
+        "flujos no itera un array dentro de un run (un run es una "
+        "fila/caso), así que el batch lo hace el tool, no el flujo."
+    ),
+    params=(
+        Param("rutas", ParamType.JSON, required=True, doc="Lista de rutas de archivo a procesar."),
+        Param("carpeta_salida", ParamType.PATH, required=True),
+        Param("patrones", ParamType.JSON, default={}, doc="Igual que en 'reescribir archivo'."),
+        Param("expresiones", ParamType.JSON, default=[], doc="Igual que en 'reescribir archivo': se aplican a las variables de cada ruta antes de armar su nombre."),
+        Param("template_nombre", default="", doc="Igual que en 'reescribir archivo'."),
+        Param("template_carpeta", default="", doc="Igual que en 'reescribir archivo'."),
+        _PARAM_PLANTILLA,
+    ),
+    outputs=(
+        Output("resultados", ParamType.JSON, doc="Uno por ruta, en el mismo orden: {origen, ok, ruta, patron, variables, nombre_nuevo, error}."),
+        Output("procesados", ParamType.INT),
+        Output("fallidos", ParamType.INT),
+        Output("rutas_fallidas", ParamType.JSON, doc="Los 'origen' que no se pudieron procesar, para reintentar o revisar."),
+    ),
+)
+
+
+def _reescribir_archivos(ctx: ToolContext) -> ToolResult:
+    fs = ctx.port(port_names.FS)
+    rutas = ctx.params["rutas"]
+    if not rutas:
+        return ToolResult.err("'rutas' vacío: no hay nada para procesar")
+
+    comunes = _resolver_comunes(ctx)
+    if isinstance(comunes, ToolResult):
+        return comunes
+    patrones, expresiones, template_nombre, template_carpeta = comunes
+
+    carpeta_salida = ctx.params["carpeta_salida"]
+    resultados = []
+    fallidas = []
+    for origen in rutas:
+        r = _reescribir_uno(fs, origen, carpeta_salida, patrones, expresiones, template_nombre, template_carpeta)
+        resultados.append({"origen": origen, **r})
+        if r["ok"]:
+            ctx.log(f"{origen} -> {r['ruta']} (patrón '{r['patron']}')")
+        else:
+            fallidas.append(origen)
+            ctx.log(f"{origen}: {r['error']}", "warning")
+
+    procesados = len(resultados) - len(fallidas)
+    ctx.log(f"{procesados}/{len(rutas)} archivo(s) reescritos, {len(fallidas)} fallido(s)")
+    if fallidas:
+        return ToolResult.err(
+            f"{len(fallidas)} de {len(rutas)} archivo(s) fallaron",
+            resultados=resultados, procesados=procesados, fallidos=len(fallidas), rutas_fallidas=fallidas,
+        )
+    return ToolResult.ok(resultados=resultados, procesados=procesados, fallidos=0, rutas_fallidas=[])
 
 
 # ── parsear_pts ─────────────────────────────────────────────────────────
@@ -705,6 +841,7 @@ _TOOLS = (
     (PARSEAR_NOMBRE, _parsear_nombre),
     (GENERAR_NOMBRE, _generar_nombre),
     (REESCRIBIR_ARCHIVO, _reescribir_archivo),
+    (REESCRIBIR_ARCHIVOS, _reescribir_archivos),
     (PARSEAR_PTS, _parsear_pts),
     (INSPECCIONAR_MALLA, _inspeccionar_malla),
     (CORREGIR_PUNTOS, _corregir_puntos),
