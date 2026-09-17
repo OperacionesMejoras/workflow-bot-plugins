@@ -128,6 +128,11 @@ MANIFEST = PluginManifest(
     doc="Reescribir nombres de archivo entre convenciones: probar patrones regex con named groups y aplicar un template con lo extraído.",
     ports=(port_names.FS,),
     resources=(PLANTILLAS,),
+    # Sólo para que describe_installation/list_plugins muestren qué falta
+    # antes de correr nada (core#20). La instalación real sigue saliendo de
+    # requirements.txt (con hash) — estas dos listas se mantienen iguales a
+    # mano; si se actualiza una versión acá, se actualiza también allá.
+    requires=("numpy==2.5.3", "scipy==1.18.1", "rtree==1.4.1", "trimesh==5.1.0"),
 )
 
 
