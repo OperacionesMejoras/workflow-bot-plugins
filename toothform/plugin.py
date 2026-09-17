@@ -34,6 +34,27 @@ Semántica compartida por `exportar` y `check_log`, la que el flujo espera por
 sus aristas: `ok` = export terminado sin fallas, `err` = terminado con fallas
 (o sin log: el flujo copia el log si lo hay y avisa). `check_log` además
 devuelve `loop` cuando todavía no hay un log nuevo.
+
+`toothcam_enviar` es el "camino fácil" para ToothCAM (la app de corte de
+líneas de cutting, no ToothFORM): no hay versión por línea de comandos
+documentada, pero si alguien deja el "Watch directory" de la app ya activado
+a mano sobre una carpeta fija, sólo hace falta mover los STL ahí y esperar a
+que aparezca un log. Un tool que sólo mueve no alcanza: el flujo necesita
+saber si terminó bien o mal antes de seguir, así que este tool mueve **y**
+espera, bloqueando con `clock.sleep` en vez de devolver `loop` para que el
+flujo lo reintente — es una sola espera acotada (`timeout`), no un polling
+externo que valga la pena modelar como arista. No se conoce todavía el
+formato real del log de ToothCAM (no hay licencia para probarlo), así que
+reusa `_interpretar_log` -la misma lógica de `check_log`, con el mismo
+fallback por palabras clave "success"/"fail"/"error" si no matchea el patrón
+de totales de ToothFORM- como aproximación razonable hasta tener una muestra
+real. Corregir el parseo cuando aparezca una es cambiar un regex acá, no
+tocar el flujo.
+
+El otro camino (elegir Lip Flat/Tongue Flat por corrida y abrir un archivo
+puntual) necesita clickear la ventana de la app, no sólo mover un archivo:
+para eso está el plugin `control_ventanas`, separado a propósito porque no es
+nada específico de ToothCAM.
 """
 
 from __future__ import annotations
@@ -65,8 +86,8 @@ MAX_SIMULTANEOS = "toothformMaxSimultaneos"
 MANIFEST = PluginManifest(
     name="toothform",
     label="ToothFORM",
-    version="0.3.0",
-    doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana— y leer su log de resultado.",
+    version="0.4.0",
+    doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana—, leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
     ports=(port_names.PROCESS, port_names.FS, port_names.CLOCK, port_names.WINDOW),
     settings=(
         Setting(
@@ -357,10 +378,83 @@ def _check_log(ctx: ToolContext) -> ToolResult:
     return _interpretar_log(ctx, reciente.name, fs.read_text(reciente.path, encoding="utf-8"))
 
 
+# ── toothcam_enviar ─────────────────────────────────────────────────────
+
+TOOTHCAM_ENVIAR = ToolManifest(
+    id="toothform.toothcam_enviar",
+    label="ToothCAM: enviar y esperar",
+    category="TOOTHCAM",
+    doc=(
+        "Mueve 'archivos' a 'carpeta_watch' -la carpeta que ToothCAM ya tiene "
+        "vigilada con 'Watch directory' + 'Scan dir.' + 'Compute' activados a "
+        "mano en la app- y espera a que aparezca un .log nuevo en "
+        "'carpeta_salida', reintentando cada 'intervalo' segundos hasta "
+        "'timeout'. Interpreta el log con el mismo criterio que "
+        "'verificar log' de ToothFORM (no se conoce todavía el formato real "
+        "del log de ToothCAM). Todo o nada: si falta un archivo no mueve "
+        "nada y corta antes de esperar -mover la mitad de un caso a la "
+        "carpeta vigilada dejaría a ToothCAM procesando un set incompleto."
+    ),
+    params=(
+        Param("archivos", ParamType.JSON, required=True, doc="Rutas de los STL/PTS del caso (todos los que ToothCAM necesite juntos: gum, tooth, att, etc.)."),
+        Param("carpeta_watch", ParamType.PATH, required=True, doc="La carpeta que ToothCAM tiene asignada en 'Watch directory'."),
+        Param("carpeta_salida", ParamType.PATH, required=True, doc="Donde ToothCAM deja el/los log (normalmente 'batch_result' dentro de la carpeta vigilada)."),
+        Param("intervalo", ParamType.FLOAT, default=5.0, doc="Segundos entre cada chequeo de si ya apareció el log."),
+        Param("timeout", ParamType.FLOAT, default=900.0, doc="Segundos máximos totales de espera antes de darse por vencido."),
+    ),
+    outputs=_SALIDAS_LOG + (
+        Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch', en el mismo orden que 'archivos'."),
+    ),
+)
+
+
+def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
+    fs = ctx.port(port_names.FS)
+    clock = ctx.port(port_names.CLOCK)
+    archivos = ctx.params["archivos"]
+    if not archivos:
+        return ToolResult.err("'archivos' vacío: no hay nada para enviar a ToothCAM")
+
+    carpeta_watch = ctx.params["carpeta_watch"]
+    carpeta_salida = ctx.params["carpeta_salida"]
+    if not fs.exists(carpeta_watch) or not fs.is_dir(carpeta_watch):
+        return ToolResult.err(f"no existe la carpeta vigilada por ToothCAM: {carpeta_watch}")
+    faltantes = [a for a in archivos if not fs.exists(a)]
+    if faltantes:
+        return ToolResult.err(f"no existen estos archivos, no se movió nada: {', '.join(faltantes)}")
+
+    fs.make_dirs(carpeta_salida)
+    previos = {e.name for e in _logs(fs, carpeta_salida)}
+
+    movidos = [fs.move(origen, fs.join(carpeta_watch, fs.basename(origen))) for origen in archivos]
+    ctx.log(f"{len(movidos)} archivo(s) movidos a {carpeta_watch} (ToothCAM en modo watch)")
+
+    intervalo, timeout = ctx.params["intervalo"], ctx.params["timeout"]
+    limite = clock.monotonic() + timeout
+    sin_log = dict(
+        log_file="", checkLogResult={"log_file": "", "message": ""}, exitosos=0, fallidos=0,
+        log_texto="", archivos_movidos=movidos,
+    )
+    while True:
+        nuevos = [e for e in _logs(fs, carpeta_salida) if e.name not in previos]
+        if nuevos:
+            reciente = max(nuevos, key=lambda e: e.modified_at)
+            texto = fs.read_text(reciente.path, encoding="utf-8")
+            return _interpretar_log(ctx, reciente.name, texto, archivos_movidos=movidos)
+        if ctx.cancelled:
+            return ToolResult.err("cancelado mientras esperaba el log de ToothCAM", **sin_log)
+        if clock.monotonic() >= limite:
+            return ToolResult.err(
+                f"no apareció un log nuevo de ToothCAM en {timeout:g} s en {carpeta_salida}", **sin_log,
+            )
+        clock.sleep(min(intervalo, limite - clock.monotonic()), ctx.is_cancelled_check)
+
+
 _TOOLS = (
     (EXPORTAR, _exportar),
     (ADD_QR, _add_qr),
     (CHECK_LOG, _check_log),
+    (TOOTHCAM_ENVIAR, _toothcam_enviar),
 )
 
 

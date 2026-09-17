@@ -1,6 +1,6 @@
 {
   "name": "convertidor",
-  "description": "Renombrar STL/PTS entre convenciones (regex + template), corregir puntos contra la superficie de una malla, inspeccionar/extraer volúmenes de mallas multi-parte, y sus variantes batch (rutas/mallas por lote, en paralelo).",
+  "description": "Renombrar STL/PTS entre convenciones (regex + template), corregir puntos contra una malla e inspeccionar/extraer volúmenes de mallas multi-parte, con variantes batch en paralelo.",
   "source": "workflow-bot-plugin-convertidor",
   "path": "convertidor",
   "ports": [

@@ -111,7 +111,9 @@ def test_el_plugin_carga_con_sus_cuatro_ports():
     assert not reg.errors
     plugin = next(p for p in reg.plugins if p.name == "toothform")
     assert set(plugin.ports) == {"process", "fs", "clock", "window"}
-    assert set(reg.tool_ids) == {"toothform.exportar", "toothform.add_qr", "toothform.check_log"}
+    assert set(reg.tool_ids) == {
+        "toothform.exportar", "toothform.add_qr", "toothform.check_log", "toothform.toothcam_enviar",
+    }
 
 
 # ── exportar: JSON → proceso → log ──────────────────────────────────────
@@ -340,3 +342,106 @@ def test_add_qr_con_proceso_busca_por_ejecutable_y_no_por_titulo():
 
     assert resultado.status == "ok"
     assert window.calls[0] == {"op": "find_window", "title": None, "process": exe}
+
+
+# ── toothcam_enviar: mover y esperar el log ──────────────────────────────
+
+WATCH = "D:/toothcam_watch"
+RESULT = "D:/toothcam_watch/batch_result"
+
+
+class FsLogDemorado(FakeFs):
+    """El log de 'nombre' no aparece en list_dir hasta que el reloj llega a 'aparece_en'."""
+
+    def __init__(self, clock, nombre: str, aparece_en: float, **kw) -> None:
+        super().__init__(**kw)
+        self.clock, self.nombre, self.aparece_en = clock, nombre, aparece_en
+
+    def list_dir(self, path):
+        entradas = super().list_dir(path)
+        if self.clock.monotonic() < self.aparece_en:
+            entradas = [e for e in entradas if e.name != self.nombre]
+        return entradas
+
+
+def _toothcam_enviar(fs, clock=None, **params):
+    clock = clock or FakeClock()
+    reg = _registry(fs=fs, clock=clock)
+    defaults = {"carpeta_watch": WATCH, "carpeta_salida": RESULT}
+    resultado = reg.execute("toothform.toothcam_enviar", _ctx_factory({**defaults, **params}))
+    return resultado, fs, clock
+
+
+def test_toothcam_enviar_mueve_los_archivos_antes_de_esperar():
+    # Un log que ya estaba en carpeta_salida ANTES de mover -mismo criterio que
+    # 'exportar' de ToothFORM- no cuenta: es de otro caso, no de este envío.
+    clock = FakeClock()
+    fs = FsLogDemorado(
+        clock, "20260101.log", aparece_en=3.0,
+        files={"D:/casos/uno-gum.stl": "g", "D:/casos/uno-tooth.stl": "t", f"{RESULT}/20260101.log": LOG_OK},
+        dirs=(WATCH, RESULT),
+    )
+
+    resultado, fs, clock = _toothcam_enviar(
+        fs, clock, archivos=["D:/casos/uno-gum.stl", "D:/casos/uno-tooth.stl"], intervalo=3.0,
+    )
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["log_file"] == "20260101.log"
+    assert resultado.outputs["archivos_movidos"] == [f"{WATCH}/uno-gum.stl", f"{WATCH}/uno-tooth.stl"]
+    assert f"{WATCH}/uno-gum.stl" in fs.files and "D:/casos/uno-gum.stl" not in fs.files
+
+
+def test_toothcam_enviar_espera_el_log_que_todavia_no_aparecio():
+    clock = FakeClock()
+    fs = FsLogDemorado(
+        clock, "20260101.log", aparece_en=10.0,
+        files={"D:/casos/uno-gum.stl": "g", f"{RESULT}/20260101.log": LOG_OK},
+        dirs=(WATCH, RESULT),
+    )
+
+    resultado, _, clock = _toothcam_enviar(
+        fs, clock, archivos=["D:/casos/uno-gum.stl"], intervalo=3.0, timeout=60.0,
+    )
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["log_file"] == "20260101.log"
+    assert clock.total_slept >= 10.0  # esperó de verdad, en vez de encontrarlo de casualidad
+
+
+def test_toothcam_enviar_agota_el_timeout_sin_log_es_err():
+    clock = FakeClock()
+    fs = FsLogDemorado(
+        clock, "nunca.log", aparece_en=10_000.0,
+        files={"D:/casos/uno-gum.stl": "g"}, dirs=(WATCH, RESULT),
+    )
+
+    resultado, _, _ = _toothcam_enviar(
+        fs, clock, archivos=["D:/casos/uno-gum.stl"], intervalo=5.0, timeout=12.0,
+    )
+
+    assert resultado.status == "err"
+    assert "timeout" in resultado.message or "no apareció" in resultado.message
+    assert resultado.outputs["archivos_movidos"] == [f"{WATCH}/uno-gum.stl"]
+
+
+def test_toothcam_enviar_no_mueve_nada_si_falta_un_archivo():
+    fs = FakeFs(files={"D:/casos/uno-gum.stl": "g"}, dirs=(WATCH, RESULT))
+
+    resultado, fs, _ = _toothcam_enviar(fs, archivos=["D:/casos/uno-gum.stl", "D:/casos/no-existe.stl"])
+
+    assert resultado.status == "err"
+    assert "D:/casos/no-existe.stl" in resultado.message
+    assert "D:/casos/uno-gum.stl" in fs.files  # no se movió nada, ni siquiera el que sí existía
+
+
+def test_toothcam_enviar_carpeta_watch_inexistente_es_err():
+    resultado, _, _ = _toothcam_enviar(FakeFs(dirs=(RESULT,)), archivos=["D:/casos/uno-gum.stl"])
+
+    assert resultado.status == "err"
+
+
+def test_toothcam_enviar_archivos_vacio_es_err():
+    resultado, _, _ = _toothcam_enviar(FakeFs(dirs=(WATCH, RESULT)), archivos=[])
+
+    assert resultado.status == "err"
