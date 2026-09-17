@@ -54,7 +54,14 @@ por `indices` (con `ordenar_por_tamano` para no tener que adivinar qué
 posición es "la más grande") y las vuelve a pegar en un solo STL. Exporta
 binario (`trimesh.export(file_type="stl")` + `fs.write_bytes`), no ASCII —
 para una malla real de miles de caras, ASCII pesa varias veces más por
-triángulo sin aportar nada.
+triángulo sin aportar nada. `extraer_partes` (plural) es la misma idea que
+`reescribir_archivos`/`inspeccionar_mallas`: recibe una lista de rutas
+(típicamente el `multivolumen` de `inspeccionar_mallas`) y aplica los mismos
+`indices`/`modo` a cada una, guardando cada resultado en `carpeta_salida` con
+el nombre original — sin esto, pasarle una lista directo a `extraer_parte`
+(que espera una sola ruta en `stl`) falla con "no existe el archivo"
+(Python vuelca la lista como texto: `['ruta1', 'ruta2', ...]`, y ese texto no
+es ningún archivo).
 
 `parsear_pts` y `corregir_puntos` son el mapeo geométrico de
 `utils/geometry.py` y `utils/parser.py` (parse_pts_file) del Convertidor
@@ -149,7 +156,7 @@ PLANTILLAS = Resource(
 MANIFEST = PluginManifest(
     name="convertidor",
     label="Convertidor",
-    version="0.4.1",
+    version="0.4.2",
     doc="Reescribir nombres de archivo entre convenciones: probar patrones regex con named groups y aplicar un template con lo extraído.",
     ports=(port_names.FS,),
     resources=(PLANTILLAS,),
@@ -755,6 +762,72 @@ EXTRAER_PARTE = ToolManifest(
 )
 
 
+def _extraer_una(trimesh, fs, ruta_stl: str, destino: str, indices: list, modo: str, ordenar_por_tamano: bool, orden: str) -> dict:
+    """
+    Un archivo: {ok, ruta, indices_incluidos, volumenes_totales,
+    volumenes_incluidos, caras, vertices, error}. Nunca levanta — todo error
+    queda en 'error' con 'ok'=False, para que quien procesa muchos
+    (extraer_partes) pueda seguir con el resto.
+    """
+    resultado = {
+        "ok": False, "ruta": "", "indices_incluidos": [], "volumenes_totales": 0,
+        "volumenes_incluidos": 0, "caras": 0, "vertices": 0, "error": "",
+    }
+    if not fs.exists(ruta_stl) or fs.is_dir(ruta_stl):
+        resultado["error"] = f"no existe el archivo: {ruta_stl}"
+        return resultado
+
+    try:
+        malla = trimesh.load(io.BytesIO(fs.read_bytes(ruta_stl)), file_type="stl", force="mesh")
+    except Exception as exc:
+        resultado["error"] = f"no se pudo leer la malla de '{ruta_stl}': {exc}"
+        return resultado
+
+    partes = list(malla.split(only_watertight=False))
+    total = len(partes)
+    resultado["volumenes_totales"] = total
+    if total == 0:
+        resultado["error"] = f"'{ruta_stl}' no tiene ninguna parte separable"
+        return resultado
+
+    orden_indices = list(range(total))
+    if ordenar_por_tamano:
+        descendente = orden.strip().lower() != "asc"
+        orden_indices.sort(key=lambda i: len(partes[i].faces), reverse=descendente)
+
+    if not indices:
+        resultado["error"] = "'indices' vacío: no hay nada para elegir"
+        return resultado
+
+    seleccion = set()
+    for idx in indices:
+        try:
+            seleccion.add(orden_indices[idx])  # el indexado de Python ya banca negativos acá
+        except (IndexError, TypeError):
+            resultado["error"] = f"índice {idx!r} fuera de rango (la malla tiene {total} parte(s): -{total}..{total - 1})"
+            return resultado
+
+    modo = modo.strip().lower()
+    if modo not in ("incluir", "excluir"):
+        resultado["error"] = f"'modo' inválido: '{modo}' (esperado 'incluir' o 'excluir')"
+        return resultado
+    elegidos = [i for i in range(total) if (i in seleccion) == (modo == "incluir")]
+    if not elegidos:
+        resultado["error"] = "la selección no dejó ninguna parte (revisar 'indices'/'modo')"
+        return resultado
+
+    resultado_mesh = trimesh.util.concatenate([partes[i] for i in elegidos])
+
+    fs.make_dirs(fs.parent(destino))
+    fs.write_bytes(destino, resultado_mesh.export(file_type="stl"))
+
+    resultado.update(
+        ok=True, ruta=destino, indices_incluidos=elegidos, volumenes_incluidos=len(elegidos),
+        caras=len(resultado_mesh.faces), vertices=len(resultado_mesh.vertices),
+    )
+    return resultado
+
+
 def _extraer_parte(ctx: ToolContext) -> ToolResult:
     try:
         import numpy  # noqa: F401 — dependencia de trimesh, falla antes de intentar cargar la malla si no está
@@ -763,54 +836,95 @@ def _extraer_parte(ctx: ToolContext) -> ToolResult:
         return ToolResult.err(f"falta instalar 'trimesh' y 'numpy' en el entorno de bot-core para usar este tool ({exc})")
 
     fs = ctx.port(port_names.FS)
-    ruta_stl = ctx.params["stl"]
-    if not fs.exists(ruta_stl) or fs.is_dir(ruta_stl):
-        return ToolResult.err(f"no existe el archivo: {ruta_stl}")
-
-    try:
-        malla = trimesh.load(io.BytesIO(fs.read_bytes(ruta_stl)), file_type="stl", force="mesh")
-    except Exception as exc:
-        return ToolResult.err(f"no se pudo leer la malla de '{ruta_stl}': {exc}")
-
-    partes = list(malla.split(only_watertight=False))
-    total = len(partes)
-    if total == 0:
-        return ToolResult.err(f"'{ruta_stl}' no tiene ninguna parte separable")
-
-    orden_indices = list(range(total))
-    if ctx.params["ordenar_por_tamano"]:
-        descendente = ctx.params["orden"].strip().lower() != "asc"
-        orden_indices.sort(key=lambda i: len(partes[i].faces), reverse=descendente)
-
-    indices = ctx.params["indices"]
-    if not indices:
-        return ToolResult.err("'indices' vacío: no hay nada para elegir")
-
-    seleccion = set()
-    for idx in indices:
-        try:
-            seleccion.add(orden_indices[idx])  # el indexado de Python ya banca negativos acá
-        except (IndexError, TypeError):
-            return ToolResult.err(f"índice {idx!r} fuera de rango (la malla tiene {total} parte(s): -{total}..{total - 1})")
-
-    modo = ctx.params["modo"].strip().lower()
-    if modo not in ("incluir", "excluir"):
-        return ToolResult.err(f"'modo' inválido: '{modo}' (esperado 'incluir' o 'excluir')")
-    elegidos = [i for i in range(total) if (i in seleccion) == (modo == "incluir")]
-    if not elegidos:
-        return ToolResult.err("la selección no dejó ninguna parte (revisar 'indices'/'modo')")
-
-    resultado_mesh = trimesh.util.concatenate([partes[i] for i in elegidos])
-
-    destino = ctx.params["destino"]
-    fs.make_dirs(fs.parent(destino))
-    fs.write_bytes(destino, resultado_mesh.export(file_type="stl"))
-
-    ctx.log(f"{ruta_stl}: {len(elegidos)}/{total} parte(s) ({modo} {sorted(seleccion)}) -> {destino}")
-    return ToolResult.ok(
-        ruta=destino, indices_incluidos=elegidos, volumenes_totales=total, volumenes_incluidos=len(elegidos),
-        caras=len(resultado_mesh.faces), vertices=len(resultado_mesh.vertices),
+    r = _extraer_una(
+        trimesh, fs, ctx.params["stl"], ctx.params["destino"], ctx.params["indices"],
+        ctx.params["modo"], ctx.params["ordenar_por_tamano"], ctx.params["orden"],
     )
+    if not r["ok"]:
+        return ToolResult.err(r["error"])
+
+    ctx.log(f"{ctx.params['stl']}: {r['volumenes_incluidos']}/{r['volumenes_totales']} parte(s) -> {r['ruta']}")
+    return ToolResult.ok(
+        ruta=r["ruta"], indices_incluidos=r["indices_incluidos"], volumenes_totales=r["volumenes_totales"],
+        volumenes_incluidos=r["volumenes_incluidos"], caras=r["caras"], vertices=r["vertices"],
+    )
+
+
+# ── extraer_partes (batch) ───────────────────────────────────────────────
+
+EXTRAER_PARTES = ToolManifest(
+    id="convertidor.extraer_partes",
+    label="extraer/filtrar partes de malla (varios)",
+    category="CONVERTIDOR",
+    doc=(
+        "Como 'extraer parte', pero para varios STL a la vez: aplica los "
+        "mismos 'indices'/'modo'/'ordenar_por_tamano'/'orden' a cada ruta de "
+        "'stls', guardando cada resultado en 'carpeta_salida' con el mismo "
+        "nombre de archivo que el original. No corta al primer error — sigue "
+        "con el resto y junta todo en 'resultados'. Pensado para engancharse "
+        "directo con el 'multivolumen' que devuelve 'inspeccionar mallas': "
+        "ese output ya es una lista de rutas, y 'extraer parte' (singular) "
+        "sólo acepta una ruta de archivo, no una lista."
+    ),
+    params=(
+        Param("stls", ParamType.JSON, required=True, doc="Lista de rutas de STL a procesar (ej. 'multivolumen' de 'inspeccionar mallas')."),
+        Param("carpeta_salida", ParamType.PATH, required=True, doc="Cada resultado se guarda acá con el mismo nombre de archivo que su origen."),
+        Param("indices", ParamType.JSON, required=True, doc="Igual que en 'extraer parte', aplicado a cada STL por separado."),
+        Param("modo", default="incluir", doc="Igual que en 'extraer parte'."),
+        Param("ordenar_por_tamano", ParamType.BOOL, default=False, doc="Igual que en 'extraer parte'."),
+        Param("orden", default="desc", doc="Igual que en 'extraer parte'."),
+    ),
+    outputs=(
+        Output("resultados", ParamType.JSON, doc="Uno por ruta, en el mismo orden: {origen, ok, ruta, indices_incluidos, volumenes_totales, volumenes_incluidos, caras, vertices, error}."),
+        Output("procesados", ParamType.INT),
+        Output("fallidos", ParamType.INT),
+        Output("rutas_fallidas", ParamType.JSON, doc="Los 'origen' que no se pudieron procesar, para reintentar o revisar."),
+    ),
+)
+
+
+def _extraer_partes(ctx: ToolContext) -> ToolResult:
+    try:
+        import numpy  # noqa: F401
+        import trimesh
+    except ImportError as exc:
+        return ToolResult.err(f"falta instalar 'trimesh' y 'numpy' en el entorno de bot-core para usar este tool ({exc})")
+
+    fs = ctx.port(port_names.FS)
+    stls = ctx.params["stls"]
+    if not stls:
+        return ToolResult.err("'stls' vacío: no hay nada para procesar")
+
+    carpeta_salida = ctx.params["carpeta_salida"]
+    indices = ctx.params["indices"]
+    modo = ctx.params["modo"]
+    ordenar_por_tamano = ctx.params["ordenar_por_tamano"]
+    orden = ctx.params["orden"]
+
+    crudos = _en_paralelo(
+        stls,
+        lambda origen: _extraer_una(
+            trimesh, fs, origen, fs.join(carpeta_salida, fs.basename(origen)), indices, modo, ordenar_por_tamano, orden,
+        ),
+    )
+    resultados = []
+    fallidas = []
+    for origen, r in zip(stls, crudos):
+        resultados.append({"origen": origen, **r})
+        if r["ok"]:
+            ctx.log(f"{origen}: {r['volumenes_incluidos']}/{r['volumenes_totales']} parte(s) -> {r['ruta']}")
+        else:
+            fallidas.append(origen)
+            ctx.log(f"{origen}: {r['error']}", "warning")
+
+    procesados = len(resultados) - len(fallidas)
+    ctx.log(f"{procesados}/{len(stls)} malla(s) procesada(s), {len(fallidas)} fallida(s)")
+    if fallidas:
+        return ToolResult.err(
+            f"{len(fallidas)} de {len(stls)} archivo(s) fallaron",
+            resultados=resultados, procesados=procesados, fallidos=len(fallidas), rutas_fallidas=fallidas,
+        )
+    return ToolResult.ok(resultados=resultados, procesados=procesados, fallidos=0, rutas_fallidas=[])
 
 
 # ── corregir_puntos ─────────────────────────────────────────────────────
@@ -1075,6 +1189,7 @@ _TOOLS = (
     (INSPECCIONAR_MALLA, _inspeccionar_malla),
     (INSPECCIONAR_MALLAS, _inspeccionar_mallas),
     (EXTRAER_PARTE, _extraer_parte),
+    (EXTRAER_PARTES, _extraer_partes),
     (CORREGIR_PUNTOS, _corregir_puntos),
     (APLICAR_EXPRESIONES, _aplicar_expresiones),
 )

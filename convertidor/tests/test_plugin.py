@@ -120,6 +120,10 @@ def _extraer(fs, **params):
     return _registry(adapters={"fs": fs}).execute("convertidor.extraer_parte", _factory(params))
 
 
+def _extraer_varias(fs, **params):
+    return _registry(adapters={"fs": fs}).execute("convertidor.extraer_partes", _factory(params))
+
+
 def _aplicar_expr(plantillas=(), **params):
     return _registry().execute("convertidor.aplicar_expresiones", _factory(params, plantillas))
 
@@ -644,6 +648,58 @@ def test_extraer_parte_sin_trimesh_instalado_es_err_claro(monkeypatch):
     r = _extraer(fs, stl="D:/malla.stl", destino="D:/salida/x.stl", indices=[0])
     assert r.status == "err"
     assert "trimesh" in r.message
+
+
+# ── extraer_partes (batch) ───────────────────────────────────────────────
+#
+# Existe porque pasarle una lista (ej. el 'multivolumen' de 'inspeccionar
+# mallas') directo al 'stl' de 'extraer_parte' (que espera una sola ruta)
+# rompe con "no existe el archivo: ['ruta1', 'ruta2', ...]" — el motor de
+# flujos no tiene forma de "explotar" una lista en varios runs.
+
+def test_extraer_partes_procesa_todas_guardando_con_el_nombre_original():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={
+        "D:/uno/malla.stl": STL_TRES_PARTES,
+        "D:/dos/malla.stl": STL_TRES_PARTES,
+    })
+    r = _extraer_varias(
+        fs, stls=["D:/uno/malla.stl", "D:/dos/malla.stl"], carpeta_salida="D:/salida",
+        indices=[0, 1], ordenar_por_tamano=True,
+    )
+    assert r.status == "ok"
+    assert r.outputs["procesados"] == 2
+    assert r.outputs["fallidos"] == 0
+    assert r.outputs["rutas_fallidas"] == []
+    rutas = {res["origen"]: res["ruta"] for res in r.outputs["resultados"]}
+    assert rutas == {"D:/uno/malla.stl": "D:/salida/malla.stl", "D:/dos/malla.stl": "D:/salida/malla.stl"}
+    for res in r.outputs["resultados"]:
+        assert res["caras"] == 2 + 3  # las 2 más grandes de cada malla
+
+
+def test_extraer_partes_sigue_con_el_resto_si_una_falla():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/uno.stl": STL_TRES_PARTES})
+    r = _extraer_varias(fs, stls=["D:/uno.stl", "D:/no-existe.stl"], carpeta_salida="D:/salida", indices=[0])
+    assert r.status == "err"
+    assert r.outputs["procesados"] == 1
+    assert r.outputs["fallidos"] == 1
+    assert r.outputs["rutas_fallidas"] == ["D:/no-existe.stl"]
+    ok_por_origen = {res["origen"]: res["ok"] for res in r.outputs["resultados"]}
+    assert ok_por_origen == {"D:/uno.stl": True, "D:/no-existe.stl": False}
+
+
+def test_extraer_partes_sin_trimesh_instalado_es_err_claro(monkeypatch):
+    monkeypatch.setitem(sys.modules, "trimesh", None)
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer_varias(fs, stls=["D:/malla.stl"], carpeta_salida="D:/salida", indices=[0])
+    assert r.status == "err"
+    assert "trimesh" in r.message
+
+
+def test_extraer_partes_stls_vacio_es_err():
+    r = _extraer_varias(FakeFs(), stls=[], carpeta_salida="D:/salida", indices=[0])
+    assert r.status == "err"
 
 
 def test_corregir_puntos_sin_trimesh_instalado_es_err_claro(monkeypatch):
