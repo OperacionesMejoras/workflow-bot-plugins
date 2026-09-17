@@ -1,0 +1,56 @@
+%% folder: CAM
+%% description: Manda los archivos de un caso a la carpeta que ToothCAM vigila, espera a que genere la línea de corte y ramifica por el resultado del log
+%%
+%% Es el "camino fácil" de ToothCAM: la app no tiene línea de comandos, pero
+%% sí un modo "Watch directory" que procesa solo lo que caiga en una carpeta.
+%% Ese modo se configura UNA VEZ a mano en la máquina donde corre ToothCAM
+%% (toolbar "Watch directory" → "Assign" la carpeta → tildar "Scan dir." y
+%% "Compute") y queda así; el flujo no lo toca. Por eso acá hay un solo nodo
+%% de ToothCAM y ningún port de ventana: mover los archivos y esperar el log
+%% alcanza.
+%%
+%% Precondición que el flujo NO puede verificar: ToothCAM tiene que estar
+%% abierto y con el watch activo. Si no lo está, los archivos quedan en la
+%% carpeta y el nodo corta por timeout —que es el comportamiento correcto,
+%% pero conviene saber que ese err puede significar "nadie abrió la app".
+%%
+%% Variables que hay que darle con la fila (o por {env.*}):
+%% filesFolder = carpeta con los archivos del caso; toothcamWatch = la carpeta
+%% que ToothCAM tiene asignada en "Watch directory"; toothcamResult = donde
+%% deja los resultados (por defecto "batch_result" adentro de la vigilada).
+%%
+%% "Buscar archivos" va por etiqueta ({id_externo}, el prefijo que comparten
+%% todos los archivos del caso) y no por patrón, a propósito: ToothCAM
+%% necesita TODO el set junto, no sólo el STL (-gum, -tooth, -att, -MatA, y
+%% el .pts si el dato es de ese tipo; los sufijos son configurables en
+%% "Program setting" → "Model file keywords" de la app), así que filtrar por
+%% extensión sería una forma de perder una parte sin darse cuenta. Por eso
+%% toothcam_enviar además es todo o nada: si falta un archivo no mueve
+%% ninguno, en vez de dejar a ToothCAM calculando con un set incompleto.
+%%
+%% Si en algún momento hace falta un patrón en vez de etiqueta: el regex va
+%% entre comillas si tiene pipes o comas (patron="^.+\.(stl|ply)$"), porque
+%% el núcleo separa los params por "," y "|"; y sin cuantificadores {n},
+%% porque leería {2} como una variable.
+%%
+%% OJO, límite conocido: todavía no tenemos una muestra real del log de
+%% ToothCAM (no hay licencia libre para probarlo), así que el nodo lo
+%% interpreta con el mismo criterio que el log de ToothFORM y, si no
+%% reconoce el formato, decide por las palabras "success" / "fail" / "error".
+%% Cuando aparezca un log de verdad hay que confirmar el parseo en
+%% toothform/plugin.py; el flujo no cambia.
+flowchart TD
+    SN(inicio)
+    BUSCAR["Buscar los archivos del caso § archivos.buscar | carpeta={filesFolder}, etiqueta={id_externo}"]
+    SIN_DATOS["No hay datos para cortar § core.log | message=No se encontraron los archivos del caso en {filesFolder}, level=error"]
+    ENVIAR["Enviar a ToothCAM y esperar § toothform.toothcam_enviar | archivos={rutas}, carpeta_watch={toothcamWatch}, carpeta_salida={toothcamResult}, intervalo=5, timeout=1800"]
+    LISTO["Línea de corte generada § core.log | message=ToothCAM terminó: {checkLogResult.message}"]
+    FALLO["ToothCAM reportó una falla § core.log | message=ToothCAM: {checkLogResult.message} (log {log_file}), level=error"]
+    CORTAR["marcar el caso § core.set_status | status=err"]
+    SN --> BUSCAR
+    BUSCAR -->|ok| ENVIAR
+    BUSCAR -->|err| SIN_DATOS
+    ENVIAR -->|ok| LISTO
+    ENVIAR -->|err| FALLO
+    SIN_DATOS --> CORTAR
+    FALLO --> CORTAR
