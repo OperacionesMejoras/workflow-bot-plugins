@@ -94,6 +94,14 @@ def _inspeccionar(fs, **params):
     return _registry(adapters={"fs": fs}).execute("convertidor.inspeccionar_malla", _factory(params))
 
 
+def _inspeccionar_varias(fs, **params):
+    return _registry(adapters={"fs": fs}).execute("convertidor.inspeccionar_mallas", _factory(params))
+
+
+def _extraer(fs, **params):
+    return _registry(adapters={"fs": fs}).execute("convertidor.extraer_parte", _factory(params))
+
+
 def _aplicar_expr(plantillas=(), **params):
     return _registry().execute("convertidor.aplicar_expresiones", _factory(params, plantillas))
 
@@ -384,6 +392,57 @@ endfacet
 endsolid test
 """.strip("\n")
 
+# Tres islas desconectadas con 1, 2 y 3 caras respectivamente (por índice de
+# aparición: partes[0] tiene 1 cara, partes[1] tiene 2, partes[2] tiene 3) —
+# verificado con trimesh real que ese es el orden que devuelve .split(), así
+# que "ordenar_por_tamano" cambia el orden y "sin ordenar" no.
+STL_TRES_PARTES = """
+solid test
+facet normal 0 0 1
+ outer loop
+  vertex 0 0 0
+  vertex 1 0 0
+  vertex 0 1 0
+ endloop
+endfacet
+facet normal 0 0 1
+ outer loop
+  vertex 10 0 0
+  vertex 11 0 0
+  vertex 11 1 0
+ endloop
+endfacet
+facet normal 0 0 1
+ outer loop
+  vertex 10 0 0
+  vertex 11 1 0
+  vertex 10 1 0
+ endloop
+endfacet
+facet normal 0 0 1
+ outer loop
+  vertex 20 0 0
+  vertex 21 0 0
+  vertex 21 1 0
+ endloop
+endfacet
+facet normal 0 0 1
+ outer loop
+  vertex 20 0 0
+  vertex 21 1 0
+  vertex 20 1 0
+ endloop
+endfacet
+facet normal 0 0 1
+ outer loop
+  vertex 21 0 0
+  vertex 22 0 0
+  vertex 21 1 0
+ endloop
+endfacet
+endsolid test
+""".strip("\n")
+
 
 def test_inspeccionar_malla_de_un_solo_volumen():
     pytest.importorskip("trimesh")
@@ -416,6 +475,157 @@ def test_inspeccionar_malla_sin_trimesh_instalado_es_err_claro(monkeypatch):
 def test_inspeccionar_malla_archivo_inexistente_es_err():
     r = _inspeccionar(FakeFs(), stl="D:/no-existe.stl")
     assert r.status == "err"
+
+
+# ── inspeccionar_mallas (batch) ──────────────────────────────────────────
+
+def test_inspeccionar_mallas_procesa_todas_y_junta_las_multivolumen():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={
+        "D:/uno.stl": STL_TRIANGULO,
+        "D:/dos.stl": STL_DOS_VOLUMENES,
+    })
+    r = _inspeccionar_varias(fs, rutas=["D:/uno.stl", "D:/dos.stl"])
+    assert r.status == "ok"
+    assert r.outputs["procesados"] == 2
+    assert r.outputs["fallidos"] == 0
+    assert r.outputs["rutas_fallidas"] == []
+    assert r.outputs["multivolumen"] == ["D:/dos.stl"]
+    volumenes = {res["ruta"]: res["volumenes"] for res in r.outputs["resultados"]}
+    assert volumenes == {"D:/uno.stl": 1, "D:/dos.stl": 2}
+
+
+def test_inspeccionar_mallas_sigue_con_el_resto_si_una_falla():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/uno.stl": STL_TRIANGULO})
+    r = _inspeccionar_varias(fs, rutas=["D:/uno.stl", "D:/no-existe.stl"])
+    assert r.status == "err"
+    assert r.outputs["procesados"] == 1
+    assert r.outputs["fallidos"] == 1
+    assert r.outputs["rutas_fallidas"] == ["D:/no-existe.stl"]
+    # la que sí existía se inspeccionó igual, no la frenó la falla de la otra
+    ok_por_ruta = {res["ruta"]: res["ok"] for res in r.outputs["resultados"]}
+    assert ok_por_ruta == {"D:/uno.stl": True, "D:/no-existe.stl": False}
+
+
+def test_inspeccionar_mallas_sin_trimesh_instalado_es_err_claro(monkeypatch):
+    monkeypatch.setitem(sys.modules, "trimesh", None)
+    fs = FakeFs(files={"D:/malla.stl": STL_TRIANGULO})
+    r = _inspeccionar_varias(fs, rutas=["D:/malla.stl"])
+    assert r.status == "err"
+    assert "trimesh" in r.message
+
+
+def test_inspeccionar_mallas_rutas_vacio_es_err():
+    r = _inspeccionar_varias(FakeFs(), rutas=[])
+    assert r.status == "err"
+
+
+# ── extraer_parte ─────────────────────────────────────────────────────────
+#
+# STL_TRES_PARTES: partes[0]=1 cara, partes[1]=2 caras, partes[2]=3 caras
+# (orden real de trimesh.split(), verificado). "ordenar_por_tamano" con
+# 'desc' pone ese orden como [2, 1, 0]; con 'asc', [0, 1, 2].
+#
+# Nota: FakeFs.write_bytes/read_bytes corrompe binario real (decodifica a
+# UTF-8 con errors="replace" y reencodea) — no es un bug de este plugin, es
+# de backend/tests/fakes.py. Por eso estos tests verifican los outputs de
+# metadata (caras, vertices, indices_incluidos), que salen de la malla en
+# memoria antes de escribirse, y no releen 'destino' a través de FakeFs.
+
+def test_extraer_parte_ordenado_por_tamano_incluye_las_mas_grandes():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(
+        fs, stl="D:/malla.stl", destino="D:/salida/top2.stl",
+        indices=[0, 1], ordenar_por_tamano=True,  # 'desc' es default: las 2 más grandes
+    )
+    assert r.status == "ok"
+    assert r.outputs["volumenes_totales"] == 3
+    assert r.outputs["volumenes_incluidos"] == 2
+    assert sorted(r.outputs["indices_incluidos"]) == [1, 2]  # las de 2 y 3 caras, no la de 1
+    assert r.outputs["caras"] == 2 + 3
+    assert "D:/salida/top2.stl" in fs.files
+
+
+def test_extraer_parte_excluir_con_ordenar_por_tamano():
+    pytest.importorskip("trimesh")
+    # "todo menos la 2da más grande" (índice 1 en el orden desc = partes[1], 2 caras)
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(
+        fs, stl="D:/malla.stl", destino="D:/salida/sin_2da.stl",
+        indices=[1], modo="excluir", ordenar_por_tamano=True,
+    )
+    assert r.status == "ok"
+    assert sorted(r.outputs["indices_incluidos"]) == [0, 2]  # quedan la más chica y la más grande
+    assert r.outputs["caras"] == 1 + 3
+
+
+def test_extraer_parte_indice_negativo_es_la_mas_chica_ordenando_por_tamano():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(
+        fs, stl="D:/malla.stl", destino="D:/salida/chica.stl",
+        indices=[-1], ordenar_por_tamano=True,
+    )
+    assert r.status == "ok"
+    assert r.outputs["indices_incluidos"] == [0]  # partes[0] tiene 1 cara: la más chica
+    assert r.outputs["caras"] == 1
+
+
+def test_extraer_parte_sin_ordenar_usa_el_orden_de_trimesh_split():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(
+        fs, stl="D:/malla.stl", destino="D:/salida/primera.stl",
+        indices=[0],  # ordenar_por_tamano default False
+    )
+    assert r.status == "ok"
+    assert r.outputs["indices_incluidos"] == [0]
+    assert r.outputs["caras"] == 1  # partes[0] sin ordenar: la primera del archivo, no la más chica ni más grande
+
+
+def test_extraer_parte_indice_fuera_de_rango_es_err_con_el_rango_valido():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(fs, stl="D:/malla.stl", destino="D:/salida/x.stl", indices=[5])
+    assert r.status == "err"
+    assert "-3..2" in r.message
+
+
+def test_extraer_parte_indices_vacio_es_err():
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(fs, stl="D:/malla.stl", destino="D:/salida/x.stl", indices=[])
+    assert r.status == "err"
+
+
+def test_extraer_parte_modo_invalido_es_err():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(fs, stl="D:/malla.stl", destino="D:/salida/x.stl", indices=[0], modo="algo")
+    assert r.status == "err"
+    assert "algo" in r.message
+
+
+def test_extraer_parte_excluir_todo_es_err_seleccion_vacia():
+    pytest.importorskip("trimesh")
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(fs, stl="D:/malla.stl", destino="D:/salida/x.stl", indices=[0, 1, 2], modo="excluir")
+    assert r.status == "err"
+    assert "D:/salida/x.stl" not in fs.files
+
+
+def test_extraer_parte_archivo_inexistente_es_err():
+    r = _extraer(FakeFs(), stl="D:/no-existe.stl", destino="D:/salida/x.stl", indices=[0])
+    assert r.status == "err"
+
+
+def test_extraer_parte_sin_trimesh_instalado_es_err_claro(monkeypatch):
+    monkeypatch.setitem(sys.modules, "trimesh", None)
+    fs = FakeFs(files={"D:/malla.stl": STL_TRES_PARTES})
+    r = _extraer(fs, stl="D:/malla.stl", destino="D:/salida/x.stl", indices=[0])
+    assert r.status == "err"
+    assert "trimesh" in r.message
 
 
 def test_corregir_puntos_sin_trimesh_instalado_es_err_claro(monkeypatch):
