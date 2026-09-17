@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import time
 
 import pytest
 
@@ -23,7 +24,7 @@ from backend.core.contract import ToolContext  # noqa: E402
 from backend.core.registry import ToolRegistry  # noqa: E402
 from backend.tests.fakes import FakeFs  # noqa: E402
 
-from plugins.convertidor.plugin import build_plugin  # noqa: E402
+from plugins.convertidor.plugin import _en_paralelo, build_plugin  # noqa: E402
 
 
 def test_el_paquete_expone_plugin_como_lo_busca_el_nucleo():
@@ -35,6 +36,23 @@ def test_el_paquete_expone_plugin_como_lo_busca_el_nucleo():
 
     assert hasattr(paquete, "PLUGIN"), "convertidor/__init__.py tiene que re-exportar PLUGIN"
     assert paquete.PLUGIN.manifest.name == "convertidor"
+
+
+def test_en_paralelo_superpone_la_espera_en_vez_de_sumarla():
+    # Si "rutas" con archivos lentos (red, WiFi) se procesaran de a uno, 5
+    # ítems de 0.2s tardarían ~1s. En paralelo, la espera se superpone y
+    # tarda apenas más que un solo ítem — esto es lo que reescribir_archivos
+    # e inspeccionar_mallas ganan al usar _en_paralelo en vez de un for chato.
+    def lento(item):
+        time.sleep(0.2)
+        return item * 2
+
+    inicio = time.monotonic()
+    resultado = _en_paralelo(list(range(5)), lento)
+    transcurrido = time.monotonic() - inicio
+
+    assert resultado == [0, 2, 4, 6, 8]  # mismo orden que la entrada, no el de finalización
+    assert transcurrido < 0.6  # muy por debajo de 5 * 0.2s = 1s si fuera secuencial
 
 
 # Los mismos dos patrones que traía `patterns.py` del Convertidor original.

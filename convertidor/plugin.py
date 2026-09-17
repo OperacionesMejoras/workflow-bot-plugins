@@ -30,7 +30,11 @@ motor de flujos no tiene un nodo "por cada elemento de un array" (un run es
 una fila/caso, no una colección), así que procesar lo que devuelve
 `archivos.buscar` de a uno necesitaría un run por archivo. No corta al primer
 error — seguir con el resto y juntar un resumen es más útil que perder toda
-una tanda por un archivo con un nombre raro.
+una tanda por un archivo con un nombre raro. Procesa `rutas` con
+`_en_paralelo` (un `ThreadPoolExecutor`, mismo criterio que el "Análisis de
+mallas en paralelo" del Convertidor original): una tanda de archivos en un
+share de red —encima por WiFi— tarda la suma de la espera de cada uno si se
+procesan de a uno; en paralelo, esa espera se superpone.
 
 `inspeccionar_malla` cuenta los volúmenes (partes desconectadas) de un STL sin
 decidir nada por su cuenta — es el paso previo al diálogo "Inspector de
@@ -40,7 +44,8 @@ para quien arma el flujo. `inspeccionar_mallas` (plural) es la misma idea que
 `reescribir_archivos`: procesar en un solo llamado lo que devuelve
 `archivos.buscar`, con `_inspeccionar_una` reusado por archivo y sin cortar
 al primer error; además junta `multivolumen` (sólo las rutas con más de un
-volumen) para no tener que filtrar `resultados` a mano.
+volumen) para no tener que filtrar `resultados` a mano. Igual que
+`reescribir_archivos`, usa `_en_paralelo`.
 
 `extraer_parte` es lo que sigue después de detectar que un STL es
 multivolumen: separa las mismas partes que `inspeccionar_malla` (mismo
@@ -98,6 +103,7 @@ sigue ganando, así que ningún flujo existente se rompe por esto.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import os
 import re
@@ -143,7 +149,7 @@ PLANTILLAS = Resource(
 MANIFEST = PluginManifest(
     name="convertidor",
     label="Convertidor",
-    version="0.4.0",
+    version="0.4.1",
     doc="Reescribir nombres de archivo entre convenciones: probar patrones regex con named groups y aplicar un template con lo extraído.",
     ports=(port_names.FS,),
     resources=(PLANTILLAS,),
@@ -195,6 +201,23 @@ def _probar_patrones(base: str, patrones: dict) -> tuple[str, dict] | None:
 def _aplicar_template(template: str, variables: dict) -> str:
     """Puede levantar KeyError (falta una variable) o IndexError/ValueError (template roto)."""
     return template.format(**variables)
+
+
+def _en_paralelo(items: list, fn):
+    """
+    Corre fn(item) para cada item en un ThreadPoolExecutor, devolviendo los
+    resultados en el mismo orden que 'items' (executor.map ya lo garantiza).
+
+    Mismo criterio que el "Análisis de mallas en paralelo" del Convertidor
+    original (ThreadPoolExecutor en converter_app.py): leer del disco/red y
+    trimesh.split() son I/O y numérico pesado, y ambos liberan el GIL, así
+    que hilos alcanzan — no hace falta multiprocessing. Sin esto, 'rutas'
+    con archivos en un share de red (WiFi, encima) se procesan uno detrás de
+    otro y la espera de red de cada uno se suma en vez de superponerse.
+    """
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        return list(executor.map(fn, items))
+
 
 # ── parsear_nombre ──────────────────────────────────────────────────────
 
@@ -480,10 +503,12 @@ def _reescribir_archivos(ctx: ToolContext) -> ToolResult:
     patrones, expresiones, template_nombre, template_carpeta = comunes
 
     carpeta_salida = ctx.params["carpeta_salida"]
+    crudos = _en_paralelo(
+        rutas, lambda origen: _reescribir_uno(fs, origen, carpeta_salida, patrones, expresiones, template_nombre, template_carpeta),
+    )
     resultados = []
     fallidas = []
-    for origen in rutas:
-        r = _reescribir_uno(fs, origen, carpeta_salida, patrones, expresiones, template_nombre, template_carpeta)
+    for origen, r in zip(rutas, crudos):
         resultados.append({"origen": origen, **r})
         if r["ok"]:
             ctx.log(f"{origen} -> {r['ruta']} (patrón '{r['patron']}')")
@@ -665,19 +690,17 @@ def _inspeccionar_mallas(ctx: ToolContext) -> ToolResult:
     if not rutas:
         return ToolResult.err("'rutas' vacío: no hay nada para inspeccionar")
 
-    resultados = []
+    resultados = _en_paralelo(rutas, lambda ruta: _inspeccionar_una(fs, ruta))
     fallidas = []
     multivolumen = []
-    for ruta in rutas:
-        r = _inspeccionar_una(fs, ruta)
-        resultados.append(r)
+    for r in resultados:
         if r["ok"]:
-            ctx.log(f"{ruta}: {r['volumenes']} volumen(es)")
+            ctx.log(f"{r['ruta']}: {r['volumenes']} volumen(es)")
             if r["es_multivolumen"]:
-                multivolumen.append(ruta)
+                multivolumen.append(r["ruta"])
         else:
-            fallidas.append(ruta)
-            ctx.log(f"{ruta}: {r['error']}", "warning")
+            fallidas.append(r["ruta"])
+            ctx.log(f"{r['ruta']}: {r['error']}", "warning")
 
     procesados = len(resultados) - len(fallidas)
     ctx.log(f"{procesados}/{len(rutas)} malla(s) inspeccionada(s), {len(fallidas)} fallida(s), {len(multivolumen)} multivolumen")
