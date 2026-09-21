@@ -24,6 +24,22 @@ en el acto y `bots.esperar` es el que aguarda, sondeando cada tanto y dejando
 en el log del padre en qué paso va el hijo. Así un padre puede mandar a tres
 hijos y después esperar a los tres.
 
+`bots.comparar` es de otra familia: no reparte trabajo, compara **contenido**
+entre dos Bots —los flujos que tiene cada uno, o los items de una colección de
+un plugin— y devuelve qué está sólo en uno, sólo en el otro, y qué difiere.
+Existe porque mover un flujo o una plantilla de un Bot a otro hoy se hace a
+mano, y lo primero que hace falta para hacerlo sin pisar nada es ver qué
+cambia. Sólo lee: no copia nada.
+
+Lo que `comparar` NO puede ver, y por qué importa: un campo que la colección
+declaró `secret` no sale por la API (`workflow-bot-app#3`), así que dos items
+cuyos campos visibles son todos iguales pueden diferir justo en el secreto.
+Por eso hay un estado `indeterminado` además de `igual`: decir "igual" ahí
+sería mentir. La migración completa —elegir qué pisar, y los secretos— es una
+pantalla de la app, no un flujo: un plugin no puede pedirle nada a la base
+(`storage` y `crypto` son ports del núcleo) ni dibujar una pantalla (sólo
+declara colecciones y botones).
+
 Lo que este plugin NO resuelve, a propósito: la carrera entre dos Bots que
 miran la misma lista y quieren el mismo caso. Sondear "qué hace el otro" no
 alcanza para eso; hace falta un reclamo atómico en la fuente de datos (un
@@ -35,6 +51,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from urllib.parse import quote
 
 from backend.core import ports as port_names
 from backend.core.contract import (
@@ -56,8 +73,15 @@ from backend.core.contract import (
 from backend.core.ports import PortError
 
 TIMEOUT = "botsTimeout"
+MI_DIRECCION = "botsMiDireccion"
 PREFIJO_API = "/api/core"
 _URL_VALIDA = re.compile(r"^https?://[^\s/]+(:\d+)?$")
+
+# De un flujo, lo que significa algo al compararlo. `updated_at` queda afuera:
+# difiere siempre —son dos bases distintas— y no dice nada del contenido.
+_CAMPOS_FLUJO = ("content", "folder", "state", "description")
+# De un item de colección, lo que NO es del plugin sino del núcleo.
+_CAMPOS_DEL_NUCLEO = ("_updated_at", "_error")
 
 BOTS = Resource(
     name="bots",
@@ -79,13 +103,18 @@ BOTS = Resource(
 MANIFEST = PluginManifest(
     name="bots",
     label="Bots",
-    version="0.1.0",
+    version="0.2.0",
     doc="Hablar con otros Bots de la red desde un flujo: qué hacen, mandarles un caso, esperar el resultado.",
     ports=(port_names.HTTP, port_names.CLOCK),
     settings=(
         Setting(
             TIMEOUT, ParamType.INT, label="Segundos antes de dar por caído a un Bot", default=15,
             doc="Cuánto esperar cada respuesta HTTP del otro Bot.",
+        ),
+        Setting(
+            MI_DIRECCION, ParamType.STR, label="Dirección de este Bot", default="http://127.0.0.1:8000",
+            doc="La usa 'comparar' cuando no se le da un 'origen': es este Bot. Cambiala sólo si esta "
+            "instalación no escucha en el puerto 8000.",
         ),
     ),
     resources=(BOTS,),
@@ -94,7 +123,7 @@ MANIFEST = PluginManifest(
             "probar", "Probar",
             doc="Le pregunta al Bot si responde y cuántos runs tiene en vuelo.",
             resource="bots",
-            params=(Param("nombre", required=True),),
+            params=(Param("nombre", required=True, options_from="bots"),),
         ),
     ),
 )
@@ -173,6 +202,131 @@ def _estado_de(ctx: ToolContext, bot: dict) -> dict | ToolResult:
     }
 
 
+def _este_bot(ctx: ToolContext) -> dict | ToolResult:
+    """Este Bot como si fuera uno de la colección, para poder comparar contra otro."""
+    url = str(ctx.config(MI_DIRECCION) or "http://127.0.0.1:8000").strip().rstrip("/")
+    if not _URL_VALIDA.match(url):
+        return ToolResult.err(
+            f"la configuración '{MI_DIRECCION}' no es http://ip:puerto: {url!r}"
+        )
+    return {"nombre": "este Bot", "url": url}
+
+
+def _flujos_de(ctx: ToolContext, bot: dict) -> dict | ToolResult:
+    """
+    {nombre: {content, folder, state, description}} de un Bot.
+
+    Son N+1 requests porque `GET /workflows` no trae el contenido
+    (`Workflow.to_dict(with_content=False)`), y sin contenido no hay con qué
+    comparar dos flujos que se llaman igual.
+    """
+    try:
+        respuesta, lista = _pedir(ctx, bot["url"], "/workflows")
+    except PortError as exc:
+        return ToolResult.err(f"'{bot['nombre']}' no responde en {bot['url']}: {exc}")
+    if not respuesta.ok or not isinstance(lista, list):
+        return ToolResult.err(f"'{bot['nombre']}' respondió {respuesta.status} a /workflows: ¿es un Bot?")
+
+    flujos = {}
+    for entrada in lista:
+        nombre = (entrada or {}).get("name") if isinstance(entrada, dict) else None
+        if not nombre:
+            continue
+        try:
+            resp_uno, uno = _pedir(ctx, bot["url"], f"/workflows/{quote(str(nombre), safe='')}")
+        except PortError as exc:
+            return ToolResult.err(f"'{bot['nombre']}' dejó de responder leyendo '{nombre}': {exc}")
+        if not resp_uno.ok or not isinstance(uno, dict):
+            ctx.log(f"{bot['nombre']}: no se pudo leer el flujo '{nombre}' ({resp_uno.status})", level="warning")
+            continue
+        flujos[str(nombre)] = {campo: uno.get(campo) or "" for campo in _CAMPOS_FLUJO}
+    return flujos
+
+
+def _items_de(ctx: ToolContext, bot: dict, plugin: str, coleccion: str) -> tuple[dict, list, str] | ToolResult:
+    """
+    ({clave: item}, campos secretos, campo clave) de una colección de un Bot.
+
+    Los campos `secret` salen de la definición que la propia respuesta trae, no
+    de una lista escrita acá: cualquier plugin instalado en el otro Bot los
+    declara en su manifest y el endpoint los publica.
+    """
+    camino = f"/resources/{quote(plugin, safe='')}/{quote(coleccion, safe='')}"
+    try:
+        respuesta, datos = _pedir(ctx, bot["url"], camino)
+    except PortError as exc:
+        return ToolResult.err(f"'{bot['nombre']}' no responde en {bot['url']}: {exc}")
+    if not respuesta.ok or not isinstance(datos, dict):
+        detalle = datos.get("detail") if isinstance(datos, dict) else respuesta.text[:200]
+        return ToolResult.err(
+            f"'{bot['nombre']}' respondió {respuesta.status} a {camino}: {detalle or 'sin detalle'}. "
+            f"¿Tiene instalado el plugin '{plugin}' con la colección '{coleccion}'?"
+        )
+
+    definicion = datos.get("resource") or {}
+    campos = definicion.get("fields") or []
+    secretos = [c.get("name") for c in campos if isinstance(c, dict) and c.get("secret")]
+    clave = definicion.get("key_field") or "name"
+    items = {}
+    for item in datos.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        valor_clave = item.get(clave)
+        if valor_clave in (None, ""):
+            continue
+        items[str(valor_clave)] = {
+            k: v for k, v in item.items() if k not in _CAMPOS_DEL_NUCLEO and k != clave
+        }
+    return items, [s for s in secretos if s], str(clave)
+
+
+def _diferencias(origen: dict, destino: dict, secretos: list, detalle: bool) -> tuple[list, dict]:
+    """
+    El diff entre dos mapas {clave: {campo: valor}}: (items, resumen).
+
+    Es la única función que decide qué significa "distinto", a propósito: si el
+    cálculo se muda a un endpoint de la app —para que la pantalla de migración y
+    este tool no tengan dos implementaciones que divergen— se reemplaza esto y
+    el resto del tool queda igual.
+
+    `indeterminado` es el estado de un item cuyos campos visibles son todos
+    iguales pero cuya colección declara campos `secret`: no salen por la API, así
+    que podría diferir justo ahí. Decir `igual` sería afirmar algo que no se
+    puede ver.
+    """
+    items = []
+    for clave in sorted(set(origen) | set(destino)):
+        aca, alla = origen.get(clave), destino.get(clave)
+        if alla is None:
+            items.append({"clave": clave, "estado": "solo_origen", "campos": []})
+            continue
+        if aca is None:
+            items.append({"clave": clave, "estado": "solo_destino", "campos": []})
+            continue
+
+        distintos = sorted(
+            campo for campo in set(aca) | set(alla)
+            if campo not in secretos and aca.get(campo) != alla.get(campo)
+        )
+        if distintos:
+            entrada = {"clave": clave, "estado": "distinto", "campos": distintos}
+            if detalle:
+                entrada["origen"] = {c: aca.get(c) for c in distintos}
+                entrada["destino"] = {c: alla.get(c) for c in distintos}
+            items.append(entrada)
+        else:
+            items.append({
+                "clave": clave,
+                "estado": "indeterminado" if secretos else "igual",
+                "campos": [],
+            })
+
+    resumen = {estado: 0 for estado in ("igual", "distinto", "solo_origen", "solo_destino", "indeterminado")}
+    for item in items:
+        resumen[item["estado"]] += 1
+    return items, resumen
+
+
 # ── bots.estado ───────────────────────────────────────────────────────────
 
 ESTADO = ToolManifest(
@@ -184,7 +338,7 @@ ESTADO = ToolManifest(
         "y cómo terminó su último run. Err si no responde. Para ramificar: "
         "{libre} vale 'si' o 'no'."
     ),
-    params=(Param("bot", required=True, doc="Nombre en Bots conocidos."),),
+    params=(Param("bot", required=True, options_from="bots", doc="Nombre en Bots conocidos."),),
     outputs=(
         Output("corriendo", ParamType.INT),
         Output("libre", ParamType.STR, doc="'si' o 'no'."),
@@ -218,7 +372,7 @@ ELEGIR_LIBRE = ToolManifest(
         "empate, el primero de la lista). Los que no responden se saltean; err "
         "si ninguno responde. Deja {bot} para usarlo en bots.correr."
     ),
-    params=(Param("bots", required=True, doc="Nombres separados por coma, ej. 'Impresión 2, Impresión 3'."),),
+    params=(Param("bots", required=True, options_from="bots", doc="Nombres separados por coma, ej. 'Impresión 2, Impresión 3'."),),
     outputs=(
         Output("bot", ParamType.STR),
         Output("corriendo", ParamType.INT, doc="Cuántos tenía en vuelo el elegido."),
@@ -262,7 +416,7 @@ CORRER = ToolManifest(
         "flujo que arranca por 'refrescar row' necesita."
     ),
     params=(
-        Param("bot", required=True, doc="Nombre en Bots conocidos."),
+        Param("bot", required=True, options_from="bots", doc="Nombre en Bots conocidos."),
         Param("flujo", required=True, doc="Nombre del flujo **en el otro Bot**."),
         Param("case_id", required=True),
         Param("row", ParamType.JSON, default={}, doc="La fila para el hijo. Vacío: {id_externo: case_id}."),
@@ -316,7 +470,7 @@ ESPERAR = ToolManifest(
         "agotó 'timeout' (el hijo sigue corriendo: no se lo cancela)."
     ),
     params=(
-        Param("bot", required=True),
+        Param("bot", required=True, options_from="bots"),
         Param("ticket", required=True, doc="El {ticket} que devolvió bots.correr."),
         Param("timeout", ParamType.INT, default=900, doc="Segundos máximos de espera."),
         Param("cada", ParamType.INT, default=5, doc="Cada cuántos segundos preguntar."),
@@ -374,6 +528,117 @@ def _esperar(ctx: ToolContext) -> ToolResult:
         reloj.sleep(cada)
 
 
+# ── bots.comparar ─────────────────────────────────────────────────────────
+
+COMPARAR = ToolManifest(
+    id="bots.comparar",
+    label="comparar contenido con otro Bot",
+    category="BOTS",
+    doc=(
+        "Qué tiene distinto otro Bot: sus flujos, o los items de una colección "
+        "de un plugin. Sólo lee, no copia nada. Cada clave queda en uno de "
+        "cinco estados — igual, distinto (con qué campos), solo_origen, "
+        "solo_destino, o indeterminado (los campos visibles coinciden pero la "
+        "colección tiene campos secretos, que no salen por la API: podría "
+        "diferir justo ahí). 'origen' vacío es este Bot. Con 'detalle', cada "
+        "item distinto trae además los valores de los dos lados — puede ser "
+        "mucho texto si son flujos."
+    ),
+    params=(
+        Param("destino", required=True, options_from="bots", doc="Nombre en Bots conocidos: contra quién comparar."),
+        Param("origen", default="", options_from="bots", doc="Vacío: este Bot (ver la configuración 'Dirección de este Bot')."),
+        Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros"), doc="'flujos' o 'registros' (los items de una colección)."),
+        Param("plugin", default="", doc="Sólo con que=registros: de qué plugin es la colección, ej. 'convertidor'."),
+        Param("coleccion", default="", doc="Sólo con que=registros: qué colección, ej. 'plantillas'."),
+        Param("detalle", ParamType.BOOL, default=False, doc="Agregar a cada item distinto los valores de origen y destino."),
+    ),
+    outputs=(
+        Output("diff", ParamType.JSON, doc="El informe completo: {origen, destino, que, coleccion, campos_comparados, campos_secretos, items, resumen}."),
+        Output("hay_diferencias", ParamType.STR, doc="'si' o 'no', para ramificar."),
+        Output("distintos", ParamType.JSON, doc="Claves que existen en los dos pero difieren."),
+        Output("solo_origen", ParamType.JSON, doc="Claves que están sólo en el origen (las que habría que copiar)."),
+        Output("solo_destino", ParamType.JSON, doc="Claves que están sólo en el destino."),
+        Output("iguales", ParamType.JSON),
+        Output("indeterminados", ParamType.JSON, doc="Claves que no se pueden comparar del todo por tener campos secretos."),
+    ),
+)
+
+
+def _comparar(ctx: ToolContext) -> ToolResult:
+    destino = _bot(ctx, ctx.params["destino"])
+    if isinstance(destino, ToolResult):
+        return destino
+    nombre_origen = str(ctx.params["origen"]).strip()
+    origen = _bot(ctx, nombre_origen) if nombre_origen else _este_bot(ctx)
+    if isinstance(origen, ToolResult):
+        return origen
+    if origen["url"] == destino["url"]:
+        return ToolResult.err(f"'{origen['nombre']}' y '{destino['nombre']}' son el mismo Bot ({origen['url']})")
+
+    que = ctx.params["que"]
+    plugin = str(ctx.params["plugin"]).strip()
+    coleccion = str(ctx.params["coleccion"]).strip()
+    secretos: list = []
+
+    if que == "flujos":
+        datos_origen = _flujos_de(ctx, origen)
+        if isinstance(datos_origen, ToolResult):
+            return datos_origen
+        datos_destino = _flujos_de(ctx, destino)
+        if isinstance(datos_destino, ToolResult):
+            return datos_destino
+        comparados = list(_CAMPOS_FLUJO)
+    else:
+        if not plugin or not coleccion:
+            return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
+        lectura_origen = _items_de(ctx, origen, plugin, coleccion)
+        if isinstance(lectura_origen, ToolResult):
+            return lectura_origen
+        lectura_destino = _items_de(ctx, destino, plugin, coleccion)
+        if isinstance(lectura_destino, ToolResult):
+            return lectura_destino
+        datos_origen, secretos, _ = lectura_origen
+        datos_destino, secretos_destino, _ = lectura_destino
+        # La unión: si un lado declara un campo secreto que el otro no, igual no
+        # se puede comparar. Pasa con dos versiones distintas del mismo plugin.
+        secretos = sorted(set(secretos) | set(secretos_destino))
+        comparados = sorted(
+            {c for item in (*datos_origen.values(), *datos_destino.values()) for c in item} - set(secretos)
+        )
+
+    items, resumen = _diferencias(datos_origen, datos_destino, secretos, bool(ctx.params["detalle"]))
+    por_estado = {
+        estado: [i["clave"] for i in items if i["estado"] == estado]
+        for estado in ("igual", "distinto", "solo_origen", "solo_destino", "indeterminado")
+    }
+
+    diff = {
+        "origen": {"bot": origen["nombre"], "url": origen["url"]},
+        "destino": {"bot": destino["nombre"], "url": destino["url"]},
+        "que": que,
+        "coleccion": f"{plugin}/{coleccion}" if que == "registros" else "",
+        "campos_comparados": comparados,
+        "campos_secretos": secretos,
+        "items": items,
+        "resumen": resumen,
+    }
+    hay = resumen["distinto"] + resumen["solo_origen"] + resumen["solo_destino"]
+    ctx.log(
+        f"{origen['nombre']} vs {destino['nombre']} ({que}): {resumen['igual']} iguales, "
+        f"{resumen['distinto']} distintos, {resumen['solo_origen']} sólo acá, "
+        f"{resumen['solo_destino']} sólo allá, {resumen['indeterminado']} indeterminados"
+    )
+    return ToolResult.ok(
+        diff=diff,
+        hay_diferencias="si" if hay else "no",
+        distintos=por_estado["distinto"],
+        solo_origen=por_estado["solo_origen"],
+        solo_destino=por_estado["solo_destino"],
+        iguales=por_estado["igual"],
+        indeterminados=por_estado["indeterminado"],
+    )
+
+
 # ── Action: probar un Bot conocido ────────────────────────────────────────
 
 
@@ -398,6 +663,7 @@ def build_plugin() -> Plugin:
             FunctionTool(manifest=ELEGIR_LIBRE, fn=_elegir_libre),
             FunctionTool(manifest=CORRER, fn=_correr),
             FunctionTool(manifest=ESPERAR, fn=_esperar),
+            FunctionTool(manifest=COMPARAR, fn=_comparar),
         ],
         actions=[FunctionAction(action=MANIFEST.action("probar"), fn=_probar)],
     )

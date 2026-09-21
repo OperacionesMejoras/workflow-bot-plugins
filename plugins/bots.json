@@ -1,6 +1,6 @@
 {
   "name": "bots",
-  "description": "Hablar con otros Bots de la red desde un flujo: qué hacen, mandarles un caso sin esperar, esperar el resultado.",
+  "description": "Hablar con otros Bots de la red desde un flujo: qué hacen, mandarles un caso sin esperar, esperar el resultado, y comparar qué flujos o registros tienen distinto.",
   "source": "workflow-bot-plugin-bots",
   "path": "bots",
   "ports": [

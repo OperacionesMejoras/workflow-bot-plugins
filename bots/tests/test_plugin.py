@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import sys
+from urllib.parse import quote
 
 CATALOGO = pathlib.Path(__file__).resolve().parents[2]
 APP = pathlib.Path(os.environ.get("WORKFLOW_BOT_APP") or CATALOGO.parent / "workflow-bot-app")
@@ -39,7 +40,7 @@ def _json(datos, status=200):
     return HttpResponse(status=status, text=json.dumps(datos), headers={"content-type": "application/json"})
 
 
-def _correr(tool, params, http, clock=None, case_id="PADRE-1"):
+def _correr(tool, params, http, clock=None, case_id="PADRE-1", config=None):
     reg = ToolRegistry(adapters={"http": http, "clock": clock or FakeClock()})
     plugin = build_plugin()
     reg._add_plugin("bots", "bots:PLUGIN", plugin)
@@ -49,7 +50,8 @@ def _correr(tool, params, http, clock=None, case_id="PADRE-1"):
         declarados, extras = declaracion.split_params(params, {})
         return ToolContext(
             run_id="run-test", case_id=case_id, params=declarados, extras=extras,
-            config={}, context={}, log=lambda m, level="info": registro.append(m),
+            config=dict(config or {}), context={},
+            log=lambda m, level="info": registro.append(m),
             ports=ports or {}, resources=lambda coleccion: BOTS if coleccion == "bots" else [],
         )
 
@@ -178,12 +180,221 @@ def test_la_accion_probar_resume_el_estado():
     assert r.status == "ok" and r.message == "responde · 0 en vuelo · último run ok"
 
 
-def test_correr_acepta_row_como_texto_interpolado_por_el_nucleo():
-    """`row={variable}` llega como str(dict) de Python, con comillas simples: no es JSON, y también sirve."""
+def test_correr_recibe_row_como_objeto_de_verdad():
+    """
+    `row={variable}` llega como dict, no como texto.
+
+    Este test afirmaba lo contrario —que llegaba como `str(dict)` de Python, con
+    comillas simples, y que el plugin lo parseaba igual— porque así era cuando se
+    escribió. El núcleo lo arregló en la raíz (core#21): `resolve()` pasa la
+    lista o el dict tal cual, y `_coerce(JSON)` rechaza con un mensaje claro
+    cualquier texto que no sea JSON válido. O sea que el caso que este test
+    cubría ya no existe: hoy ese string ni llega al plugin.
+
+    `_como_objeto` se queda igual: `compatible_core` admite desde 0.3.0b4 y el
+    arreglo entró en 0.3.1-beta.2, así que un Bot con un núcleo anterior todavía
+    le pasa el texto.
+    """
     http = FakeHttp({f"{API2}/runs": _json({"ticket": "t9", "estado": "en_cola"})})
-    fila = "{'id_externo': 'AB123', 'filesFolder': 'C:\\casos\\AB123\\stl'}"
+    fila = {"id_externo": "AB123", "filesFolder": r"C:\casos\AB123\stl"}
     r, _ = _correr("bots.correr", {"bot": "Impresión 2", "flujo": "f", "case_id": "AB123", "row": fila}, http)
     assert r.status == "ok"
-    assert json.loads(http.calls[0]["body"])["row"] == {"id_externo": "AB123", "filesFolder": "C:\casos\AB123\stl"}
+    assert json.loads(http.calls[0]["body"])["row"] == fila
+
+    # Un texto que no es JSON lo corta el núcleo, antes de llegar al tool.
     r, _ = _correr("bots.correr", {"bot": "Impresión 2", "flujo": "f", "case_id": "1", "row": "no es un objeto"}, FakeHttp())
-    assert r.status == "err" and "objeto JSON" in r.message
+    assert r.status == "err" and "no es JSON válido" in r.message
+
+
+# ── comparar: el diff entre dos Bots ─────────────────────────────────────
+#
+# La forma de la salida es un contrato compartido con la pantalla de migración
+# de la app (workflow-bot-app), así que estos tests la fijan a propósito: si
+# cambia, la pantalla y este tool dejan de decir lo mismo.
+
+YO = "http://127.0.0.1:8000/api/core"
+CONFIG_YO = {"botsMiDireccion": "http://127.0.0.1:8000"}
+
+
+def _flujo(nombre, content, folder="", state="enabled", description=""):
+    return {"name": nombre, "content": content, "folder": folder, "state": state,
+            "description": description, "updated_at": 1_700_000_000.0}
+
+
+def _http_flujos(aca: dict, alla: dict) -> FakeHttp:
+    """
+    Dos Bots con sus flujos: {nombre: contenido} de cada lado.
+
+    Las URL de un flujo van con el nombre escapado porque así las pide el tool:
+    un nombre con espacios ("TOOTHCAM watch") sin escapar no es una URL válida.
+    Scriptearlas con el espacio literal no fallaba de frente, que es lo peor:
+    `FakeHttp` cae al match por prefijo, devolvía la LISTA de flujos para el GET
+    de uno solo, y el flujo se salteaba en silencio.
+    """
+    respuestas = {
+        f"{YO}/workflows": _json([_flujo(n, c) for n, c in aca.items()]),
+        f"{API2}/workflows": _json([_flujo(n, c) for n, c in alla.items()]),
+    }
+    for nombre, contenido in aca.items():
+        respuestas[f"{YO}/workflows/{quote(nombre, safe='')}"] = _json(_flujo(nombre, contenido))
+    for nombre, contenido in alla.items():
+        respuestas[f"{API2}/workflows/{quote(nombre, safe='')}"] = _json(_flujo(nombre, contenido))
+    return FakeHttp(respuestas)
+
+
+def _comparar(http, **params):
+    return _correr("bots.comparar", {"destino": "Impresión 2", **params}, http, config=CONFIG_YO)
+
+
+def test_comparar_flujos_clasifica_los_cuatro_estados():
+    http = _http_flujos(
+        aca={"igual": "A", "cambiado": "aca", "solo mio": "M"},
+        alla={"igual": "A", "cambiado": "alla", "solo suyo": "S"},
+    )
+    r, _ = _comparar(http)
+
+    assert r.status == "ok"
+    assert r.outputs["iguales"] == ["igual"]
+    assert r.outputs["distintos"] == ["cambiado"]
+    assert r.outputs["solo_origen"] == ["solo mio"]
+    assert r.outputs["solo_destino"] == ["solo suyo"]
+    assert r.outputs["hay_diferencias"] == "si"
+    assert r.outputs["diff"]["resumen"] == {
+        "igual": 1, "distinto": 1, "solo_origen": 1, "solo_destino": 1, "indeterminado": 0,
+    }
+
+
+def test_comparar_flujos_dice_que_campo_difiere_y_no_mira_updated_at():
+    # Mismo contenido, distinta carpeta: difiere 'folder' y nada más. Y aunque
+    # los dos lados traen updated_at, no cuenta: difiere siempre y no dice nada.
+    http = FakeHttp({
+        f"{YO}/workflows": _json([_flujo("F", "igual", folder="CAM")]),
+        f"{YO}/workflows/F": _json(_flujo("F", "igual", folder="CAM")),
+        f"{API2}/workflows": _json([_flujo("F", "igual", folder="FORM")]),
+        f"{API2}/workflows/F": _json(_flujo("F", "igual", folder="FORM")),
+    })
+    r, _ = _comparar(http)
+
+    assert r.status == "ok"
+    item = r.outputs["diff"]["items"][0]
+    assert (item["clave"], item["estado"], item["campos"]) == ("F", "distinto", ["folder"])
+    assert "updated_at" not in r.outputs["diff"]["campos_comparados"]
+
+
+def test_comparar_sin_diferencias_deja_hay_diferencias_en_no():
+    http = _http_flujos(aca={"F": "A"}, alla={"F": "A"})
+    r, _ = _comparar(http)
+
+    assert r.outputs["hay_diferencias"] == "no"
+    assert r.outputs["diff"]["items"] == [{"clave": "F", "estado": "igual", "campos": []}]
+
+
+def test_comparar_con_detalle_trae_los_valores_de_los_dos_lados():
+    http = _http_flujos(aca={"F": "version de aca"}, alla={"F": "version de alla"})
+    r, _ = _comparar(http, detalle=True)
+
+    item = r.outputs["diff"]["items"][0]
+    assert item["origen"] == {"content": "version de aca"}
+    assert item["destino"] == {"content": "version de alla"}
+
+
+def test_comparar_sin_detalle_no_manda_el_contenido_de_los_flujos():
+    # El content de un flujo son miles de caracteres: por N flujos, el output
+    # del nodo se vuelve inmanejable. Va sólo si se pide.
+    http = _http_flujos(aca={"F": "un contenido largo"}, alla={"F": "otro"})
+    r, _ = _comparar(http)
+
+    assert "origen" not in r.outputs["diff"]["items"][0]
+    assert "un contenido largo" not in json.dumps(r.outputs["diff"], ensure_ascii=False)
+
+
+def _http_items(aca: list, alla: list, campos=None) -> FakeHttp:
+    definicion = {
+        "key_field": "nombre",
+        "fields": campos or [{"name": "nombre", "secret": False}, {"name": "patron", "secret": False}],
+    }
+    camino = "/resources/convertidor/plantillas"
+    return FakeHttp({
+        f"{YO}{camino}": _json({"resource": definicion, "items": aca}),
+        f"{API2}{camino}": _json({"resource": definicion, "items": alla}),
+    })
+
+
+def test_comparar_registros_usa_el_key_field_de_la_definicion_y_saca_lo_del_nucleo():
+    http = _http_items(
+        aca=[{"nombre": "cnc3", "patron": "^A", "_updated_at": 1.0},
+             {"nombre": "solo mia", "patron": "^X", "_updated_at": 2.0}],
+        alla=[{"nombre": "cnc3", "patron": "^B", "_updated_at": 999.0}],
+    )
+    r, _ = _comparar(http, que="registros", plugin="convertidor", coleccion="plantillas")
+
+    assert r.status == "ok"
+    assert r.outputs["distintos"] == ["cnc3"]
+    assert r.outputs["solo_origen"] == ["solo mia"]
+    # _updated_at es del núcleo, no del plugin: difiere y no cuenta.
+    assert r.outputs["diff"]["items"][0]["campos"] == ["patron"]
+    assert r.outputs["diff"]["coleccion"] == "convertidor/plantillas"
+
+
+def test_comparar_registros_con_un_campo_secreto_es_indeterminado_no_igual():
+    # Los campos visibles coinciden, pero la colección tiene un secreto que la
+    # API no devuelve: podría diferir justo ahí. Decir "igual" sería mentir.
+    campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
+    http = _http_items(
+        aca=[{"nombre": "api", "token": None}],
+        alla=[{"nombre": "api", "token": None}],
+        campos=campos,
+    )
+    r, _ = _comparar(http, que="registros", plugin="convertidor", coleccion="plantillas")
+
+    assert r.outputs["indeterminados"] == ["api"]
+    assert r.outputs["iguales"] == []
+    assert r.outputs["diff"]["campos_secretos"] == ["token"]
+    assert "token" not in r.outputs["diff"]["campos_comparados"]
+
+
+def test_comparar_registros_sin_plugin_ni_coleccion_es_err():
+    r, _ = _comparar(FakeHttp(), que="registros")
+    assert r.status == "err" and "'plugin' y 'coleccion'" in r.message
+
+
+def test_comparar_contra_un_bot_sin_ese_plugin_explica_que_revisar():
+    camino = "/resources/convertidor/plantillas"
+    http = FakeHttp({
+        f"{YO}{camino}": _json({"resource": {"key_field": "nombre", "fields": []}, "items": []}),
+        f"{API2}{camino}": _json({"detail": "no hay una coleccion plantillas"}, status=404),
+    })
+    r, _ = _comparar(http, que="registros", plugin="convertidor", coleccion="plantillas")
+
+    assert r.status == "err"
+    assert "Impresión 2" in r.message and "convertidor" in r.message
+
+
+def test_comparar_el_mismo_bot_de_los_dos_lados_es_err_antes_de_ir_a_la_red():
+    http = FakeHttp()
+    r, _ = _correr(
+        "bots.comparar", {"destino": "Impresión 2", "origen": "Impresión 2"}, http, config=CONFIG_YO,
+    )
+    assert r.status == "err" and "el mismo Bot" in r.message
+    assert http.calls == []
+
+
+def test_comparar_entre_dos_otros_bots_no_pasa_por_este():
+    # origen puede ser otro Bot: un Bot de control que compara dos de la flota.
+    http = FakeHttp({
+        f"{API3}/workflows": _json([_flujo("F", "tres")]),
+        f"{API3}/workflows/F": _json(_flujo("F", "tres")),
+        f"{API2}/workflows": _json([_flujo("F", "dos")]),
+        f"{API2}/workflows/F": _json(_flujo("F", "dos")),
+    })
+    r, _ = _comparar(http, origen="Impresión 3")
+
+    assert r.status == "ok"
+    assert r.outputs["distintos"] == ["F"]
+    assert r.outputs["diff"]["origen"]["bot"] == "Impresión 3"
+    assert not any(c["url"].startswith("http://127.0.0.1") for c in http.calls)
+
+
+def test_comparar_un_bot_que_no_responde_es_err():
+    r, _ = _comparar(FakeHttp())
+    assert r.status == "err"
