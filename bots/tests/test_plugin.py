@@ -431,3 +431,192 @@ def test_comparar_entre_dos_otros_bots_no_pasa_por_este():
 def test_comparar_un_bot_que_no_responde_es_err():
     r, _ = _comparar(FakeHttp())
     assert r.status == "err"
+
+
+# ── Actions: la tabla que dibuja la app, y migrar ────────────────────────
+#
+# `vista` va en la Action y no en los outputs del tool: un tool es un nodo de
+# un flujo, y la vista viajaría en el contexto de cada corrida sin que ningún
+# flujo la lea. Las dos salen de la misma función, así que no pueden divergir.
+
+
+def _accion(nombre, params, http, config=None):
+    """
+    Corre una Action llenando los params como lo hace el núcleo.
+
+    Usa `Param.read_from`, que además resuelve los alias — es lo que permite
+    que la Action `comparar` reciba el `nombre` del item de la colección y lo
+    lea como su param `destino`.
+    """
+    reg = ToolRegistry(adapters={"http": http, "clock": FakeClock()})
+    reg._add_plugin("bots", "bots:PLUGIN", build_plugin())
+    registro = []
+
+    def factory(accion, ports=None):
+        completos = {}
+        for p in accion.params:
+            valor = p.read_from(params)
+            completos[p.name] = p.default if valor is None else valor
+        return ToolContext(
+            run_id="", case_id="", params=completos, extras={},
+            config=dict(config or CONFIG_YO), context={},
+            log=lambda m, level="info": registro.append(m),
+            ports=ports or {}, resources=lambda c: BOTS if c == "bots" else [],
+        )
+
+    return reg.execute_action("bots", nombre, factory), registro
+
+
+def test_la_accion_comparar_recibe_el_destino_del_item_de_la_coleccion():
+    # El botón vive en la fila de "Bots conocidos": el item entrega sus campos
+    # por su nombre real ("nombre") y el alias lo lee como 'destino'.
+    http = _http_flujos(aca={"F": "A"}, alla={"F": "A"})
+    r, _ = _accion("comparar", {"nombre": "Impresión 2"}, http)
+
+    assert r.status == "ok"
+    assert r.outputs["diff"]["destino"]["bot"] == "Impresión 2"
+
+
+def test_la_accion_comparar_devuelve_la_vista_con_columnas_y_seleccion():
+    http = _http_flujos(
+        aca={"igual": "A", "cambiado": "aca", "solo mio": "M"},
+        alla={"igual": "A", "cambiado": "alla", "solo suyo": "S"},
+    )
+    r, _ = _accion("comparar", {"destino": "Impresión 2"}, http)
+
+    assert r.status == "ok"
+    vista = r.outputs["vista"]
+    assert vista["tipo"] == "tabla" and vista["clave"] == "clave"
+    assert [c["campo"] for c in vista["columnas"]] == ["estado", "clave", "campos"]
+
+    por_clave = {f["clave"]: f for f in vista["filas"]}
+    # Elegible sólo lo que se puede empujar: no un igual, no algo que está
+    # sólo del otro lado (no existe acá, y migrar no borra de allá).
+    assert por_clave["cambiado"].get("_elegible", True) is True
+    assert por_clave["solo mio"].get("_elegible", True) is True
+    assert por_clave["igual"]["_elegible"] is False
+    assert por_clave["solo suyo"]["_elegible"] is False
+    assert "sólo en el destino" in por_clave["solo suyo"]["_nota"]
+
+    # Y el botón lleva el contexto, que es lo que la llamada nueva no sabría.
+    seleccion = vista["seleccion"]
+    assert seleccion["accion"] == "migrar" and seleccion["param"] == "claves"
+    assert seleccion["params"] == {
+        "destino": "Impresión 2", "que": "flujos",
+        "plugin": "", "coleccion": "", "incluir_secretos": False,
+    }
+    assert "pisa" in seleccion["aviso"]
+
+
+def test_la_vista_de_una_coleccion_con_secretos_no_deja_elegir_nada():
+    # Una casilla que al tildarla no hace nada es peor que no tenerla: `migrar`
+    # no migra una colección con secretos sin que se lo pidan explícito.
+    campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
+    http = _http_items(
+        aca=[{"nombre": "api", "token": None}, {"nombre": "otra", "token": None}],
+        alla=[{"nombre": "api", "token": None}],
+        campos=campos,
+    )
+    r, _ = _accion(
+        "comparar",
+        {"destino": "Impresión 2", "que": "registros", "plugin": "convertidor", "coleccion": "plantillas"},
+        http,
+    )
+
+    assert r.status == "ok"
+    vista = r.outputs["vista"]
+    assert vista["seleccion"] is None
+    assert "token" in vista["aviso"] and "incluir secretos" in vista["aviso"]
+    assert all(f["_elegible"] is False for f in vista["filas"])
+    indeterminada = next(f for f in vista["filas"] if f["clave"] == "api")
+    assert "campos secretos" in indeterminada["_nota"]
+
+
+def test_migrar_le_pide_a_su_propio_bot_y_manda_la_url_del_destino():
+    http = FakeHttp({f"{YO}/migrar": _json({"migrados": 2, "fallados": 0, "resultados": [
+        {"clave": "F1", "ok": True}, {"clave": "F2", "ok": True}]})})
+    r, _ = _accion("migrar", {"destino": "Impresión 2", "claves": ["F1", "F2"]}, http)
+
+    assert r.status == "ok" and r.outputs["migrados"] == 2
+    # El endpoint espera la URL del destino, no el nombre del Bot.
+    cuerpo = json.loads(http.calls[0]["body"])
+    assert cuerpo == {
+        "destino": "http://192.168.9.41:8000", "que": "flujos",
+        "plugin": "", "coleccion": "", "claves": ["F1", "F2"],
+    }
+    # Y el pedido va a este Bot, que es el único que puede leer un secreto suyo.
+    assert http.calls[0]["url"].startswith("http://127.0.0.1:8000")
+
+
+def test_migrar_informa_los_que_fallaron_sin_perder_los_que_anduvieron():
+    http = FakeHttp({f"{YO}/migrar": _json({"migrados": 1, "fallados": 1, "resultados": [
+        {"clave": "F1", "ok": True}, {"clave": "F2", "ok": False, "error": "nombre inválido"}]})})
+    r, registro = _accion("migrar", {"destino": "Impresión 2", "claves": ["F1", "F2"]}, http)
+
+    assert r.status == "err"
+    assert (r.outputs["migrados"], r.outputs["fallados"]) == (1, 1)
+    assert any("nombre inválido" in m for m in registro)
+
+
+def test_migrar_env_sin_pedir_secretos_no_migra_y_dice_cuantos():
+    r, _ = _accion("migrar", {"destino": "Impresión 2", "que": "env", "claves": ["A", "B"]}, FakeHttp())
+
+    assert r.status == "err"
+    assert "las 2" in r.message and "incluir secretos" in r.message
+
+
+def test_migrar_una_coleccion_con_secretos_sin_pedirlos_no_migra():
+    # Los campos secret se declaran por colección, no por item: o se migra
+    # entera o no se migra.
+    campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
+    camino = "/resources/convertidor/plantillas"
+    http = FakeHttp({f"{YO}{camino}": _json({
+        "resource": {"key_field": "nombre", "fields": campos}, "items": [{"nombre": "api"}]})})
+    r, _ = _accion("migrar", {
+        "destino": "Impresión 2", "que": "registros", "plugin": "convertidor",
+        "coleccion": "plantillas", "claves": ["api"]}, http)
+
+    assert r.status == "err"
+    assert "token" in r.message and "a ciegas" in r.message
+    # No llegó a pedir la migración: sólo leyó la definición.
+    assert not any("/migrar" in c["url"] for c in http.calls)
+
+
+def test_migrar_con_incluir_secretos_si_migra():
+    campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
+    camino = "/resources/convertidor/plantillas"
+    http = FakeHttp({
+        f"{YO}{camino}": _json({"resource": {"key_field": "nombre", "fields": campos}, "items": []}),
+        f"{YO}/migrar": _json({"migrados": 1, "fallados": 0, "resultados": [{"clave": "api", "ok": True}]}),
+    })
+    r, _ = _accion("migrar", {
+        "destino": "Impresión 2", "que": "registros", "plugin": "convertidor",
+        "coleccion": "plantillas", "claves": ["api"], "incluir_secretos": True}, http)
+
+    assert r.status == "ok" and r.outputs["migrados"] == 1
+
+
+def test_migrar_contra_una_app_sin_el_endpoint_dice_que_actualizar():
+    http = FakeHttp({f"{YO}/migrar": _json({"detail": "Not Found"}, status=404)})
+    r, _ = _accion("migrar", {"destino": "Impresión 2", "claves": ["F1"]}, http)
+
+    assert r.status == "err"
+    assert "Actualizaciones" in r.message
+
+
+def test_migrar_sin_claves_es_err_antes_de_ir_a_la_red():
+    http = FakeHttp()
+    r, _ = _accion("migrar", {"destino": "Impresión 2", "claves": []}, http)
+
+    assert r.status == "err" and http.calls == []
+
+
+def test_migrar_es_peligrosa_y_comparar_cuelga_de_la_coleccion():
+    # Lo declarado, que es lo que la app usa para confirmar antes de escribir
+    # en otra máquina y para saber dónde dibujar cada botón.
+    acciones = {a.action.name: a.action for a in build_plugin().actions}
+    assert acciones["migrar"].dangerous is True
+    assert acciones["migrar"].resource == ""
+    assert acciones["comparar"].resource == "bots"
+    destino = next(p for p in acciones["comparar"].params if p.name == "destino")
+    assert destino.aliases == ("nombre",)

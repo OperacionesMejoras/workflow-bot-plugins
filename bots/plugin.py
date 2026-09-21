@@ -45,6 +45,25 @@ si el destino no tiene la colección que se le pide, eso es un resultado —todo
 lo de acá queda como "sólo en el origen"— y no una falla. Es el caso de un Bot
 nuevo de la flota, que todavía no tiene nada.
 
+Y hay dos **Actions** para hacerlo desde la pantalla, no desde un flujo:
+`comparar` (la misma comparación, más `vista`: la tabla que la app dibuja, con
+casillas y un botón para migrar lo elegido) y `migrar`, que le pide a **este**
+Bot que empuje al otro. El plugin nunca toca un secreto: el único que puede
+leer los de una instalación es la instalación misma, así que `migrar` es un
+pedido a la propia app y no una implementación.
+
+`vista` va en la Action y no en los outputs del tool a propósito: un tool es un
+nodo de un flujo, y una vista adentro de sus outputs viajaría en el contexto de
+cada corrida y se guardaría en la base con cada una, sin que ningún flujo la
+lea. Las dos salen de la misma función, así que no pueden divergir.
+
+Los campos secretos quedan **afuera de una migración** salvo que se los pida
+explícito, y el motivo es el caso desatendido: un flujo corre cada vez, así que
+si alguien rotó ese secreto en el destino, la corrida siguiente lo revierte al
+valor viejo, y la otra también. Como los campos `secret` se declaran por
+colección y no por item, la regla que queda es simple: una colección con
+secretos se migra entera o no se migra.
+
 Lo que este plugin NO resuelve, a propósito: la carrera entre dos Bots que
 miran la misma lista y quieren el mismo caso. Sondear "qué hace el otro" no
 alcanza para eso; hace falta un reclamo atómico en la fuente de datos (un
@@ -105,10 +124,48 @@ BOTS = Resource(
     ),
 )
 
+# Las dos Actions del feature de migración. Se declaran acá —y sus funciones
+# viven más abajo, con el resto— porque el manifest las nombra al construirse.
+COMPARAR_ACCION = Action(
+    "comparar", "Comparar contenido",
+    doc="Qué tiene distinto este Bot respecto del mío: sus flujos, o los items de una colección. "
+        "Sólo lee. Después se puede elegir qué migrar.",
+    resource="bots",
+    params=(
+        # `destino` con alias `nombre`: el item de la colección entrega sus
+        # campos por su nombre real (`key_field` es "nombre"), y el alias deja
+        # que el param se siga llamando igual que en el tool.
+        Param("destino", required=True, aliases=("nombre",), options_from="bots"),
+        Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros")),
+        Param("plugin", default="", doc="Sólo con que=registros, ej. 'convertidor'."),
+        Param("coleccion", default="", doc="Sólo con que=registros, ej. 'plantillas'."),
+    ),
+)
+
+MIGRAR_ACCION = Action(
+    "migrar", "Migrar lo elegido",
+    doc="Le manda al otro Bot las claves elegidas, cifradas con la clave del emparejamiento. "
+        "Escribe en la otra punta y pisa lo que haya con ese nombre. Los campos secretos "
+        "quedan afuera salvo que se marque 'incluir secretos'.",
+    dangerous=True,
+    params=(
+        Param("destino", required=True, options_from="bots", doc="Nombre en Bots conocidos."),
+        Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros", "env")),
+        Param("plugin", default="", doc="Sólo con que=registros."),
+        Param("coleccion", default="", doc="Sólo con que=registros."),
+        Param("claves", ParamType.JSON, required=True, doc="Qué migrar: nombres de flujos, o claves de items."),
+        Param(
+            "incluir_secretos", ParamType.BOOL, default=False,
+            doc="Los campos secretos se pisan a ciegas: no se puede saber si el del otro lado difiere, "
+            "porque no sale por la API. Sin esto, una colección con campos secretos no se migra.",
+        ),
+    ),
+)
+
 MANIFEST = PluginManifest(
     name="bots",
     label="Bots",
-    version="0.2.0",
+    version="0.3.0",
     doc="Hablar con otros Bots de la red desde un flujo: qué hacen, mandarles un caso, esperar el resultado.",
     ports=(port_names.HTTP, port_names.CLOCK),
     settings=(
@@ -130,6 +187,8 @@ MANIFEST = PluginManifest(
             resource="bots",
             params=(Param("nombre", required=True, options_from="bots"),),
         ),
+        COMPARAR_ACCION,
+        MIGRAR_ACCION,
     ),
 )
 
@@ -593,7 +652,10 @@ def _comparar(ctx: ToolContext) -> ToolResult:
     destino = _bot(ctx, ctx.params["destino"])
     if isinstance(destino, ToolResult):
         return destino
-    nombre_origen = str(ctx.params["origen"]).strip()
+    # `.get` y no `[...]`: la Action `comparar` no declara `origen` ni
+    # `detalle` —su origen es siempre este Bot y la tabla no muestra valores—,
+    # y comparte esta función con el tool, que sí los declara.
+    nombre_origen = str(ctx.params.get("origen") or "").strip()
     origen = _bot(ctx, nombre_origen) if nombre_origen else _este_bot(ctx)
     if isinstance(origen, ToolResult):
         return origen
@@ -634,7 +696,7 @@ def _comparar(ctx: ToolContext) -> ToolResult:
             {c for item in (*datos_origen.values(), *datos_destino.values()) for c in item} - set(secretos)
         )
 
-    items, resumen = _diferencias(datos_origen, datos_destino, secretos, bool(ctx.params["detalle"]))
+    items, resumen = _diferencias(datos_origen, datos_destino, secretos, bool(ctx.params.get("detalle")))
     por_estado = {
         estado: [i["clave"] for i in items if i["estado"] == estado]
         for estado in ("igual", "distinto", "solo_origen", "solo_destino", "indeterminado")
@@ -672,6 +734,195 @@ def _comparar(ctx: ToolContext) -> ToolResult:
     )
 
 
+# ── Action: comparar, con la tabla que la app dibuja ─────────────────────
+#
+# La misma comparación que el tool, pero para una persona mirando la pantalla.
+# `vista` va acá y no en los outputs del tool a propósito: un tool es un nodo
+# de un flujo, y una vista adentro de sus outputs viajaría en el contexto de
+# cada corrida y se guardaría en la base con cada una, sin que ningún flujo la
+# lea. Las dos salen de `_comparar`, así que no pueden divergir.
+
+# Lo que se puede empujar al destino. `igual` no —no hay nada que mover— y
+# `solo_destino` tampoco: no existe acá, y migrar no borra del otro lado.
+_ESTADOS_MIGRABLES = frozenset({"distinto", "solo_origen", "indeterminado"})
+
+_NOTAS = {
+    "indeterminado": "tiene campos secretos: no se puede saber si difieren",
+    "solo_destino": "está sólo en el destino; migrar no lo borra de allá",
+}
+
+
+def _vista_de(diff: dict, destino_bot: str) -> dict:
+    """
+    El informe como tabla, con la convención que la app dibuja.
+
+    Las columnas salen de lo comparado y no de una lista fija porque cambian
+    por colección — es justo el motivo por el que esto va en el resultado y no
+    en el manifest.
+
+    Ninguna fila queda elegible si la colección tiene campos secretos: el botón
+    mandaría claves que `migrar` no va a migrar (excluye secretos salvo que se
+    los pidan), y una casilla que no hace nada al tildarla es peor que no
+    tenerla. Para eso está la acción `migrar` directa, con la casilla explícita.
+    """
+    hay_secretos = bool(diff["campos_secretos"])
+    es_flujo = diff["que"] == "flujos"
+
+    filas = []
+    for item in diff["items"]:
+        fila = {
+            "clave": item["clave"],
+            "estado": item["estado"],
+            "campos": ", ".join(item["campos"]),
+        }
+        elegible = item["estado"] in _ESTADOS_MIGRABLES and not hay_secretos
+        if not elegible:
+            fila["_elegible"] = False
+        nota = _NOTAS.get(item["estado"], "")
+        if nota:
+            fila["_nota"] = nota
+        filas.append(fila)
+
+    vista = {
+        "tipo": "tabla",
+        "clave": "clave",
+        "columnas": [
+            {"campo": "estado", "label": "Estado"},
+            {"campo": "clave", "label": "Flujo" if es_flujo else "Nombre"},
+            {"campo": "campos", "label": "Qué difiere"},
+        ],
+        "filas": filas,
+    }
+
+    if hay_secretos:
+        vista["seleccion"] = None
+        vista["aviso"] = (
+            f"Esta colección tiene campos secretos ({', '.join(diff['campos_secretos'])}), "
+            "que no salen por la API: no se puede saber si difieren ni migrarlos desde acá. "
+            "Para moverlos, la acción 'Migrar' con 'incluir secretos' marcado."
+        )
+        return vista
+
+    plugin, _, coleccion = diff["coleccion"].partition("/")
+    vista["seleccion"] = {
+        "accion": "migrar",
+        "param": "claves",
+        "params": {
+            "destino": destino_bot,
+            "que": diff["que"],
+            "plugin": plugin,
+            "coleccion": coleccion,
+            "incluir_secretos": False,
+        },
+        "etiqueta": f"Migrar lo elegido a {destino_bot}",
+        "aviso": (
+            "Migrar escribe en el otro Bot y pisa lo que haya con ese nombre. "
+            "No borra nada de allá que no esté acá."
+        ),
+    }
+    return vista
+
+
+def _comparar_accion(ctx: ToolContext) -> ToolResult:
+    resultado = _comparar(ctx)
+    if resultado.failed:
+        return resultado
+    diff = resultado.outputs["diff"]
+    vista = _vista_de(diff, diff["destino"]["bot"])
+    return ToolResult.ok(
+        resultado.message, vista=vista, **resultado.outputs,
+    )
+
+
+# ── Action: migrar lo elegido ───────────────────────────────────────────
+
+def _migrar(ctx: ToolContext) -> ToolResult:
+    """
+    Le pide a **este** Bot que empuje al otro. El plugin no toca un secreto.
+
+    Quien lee un secreto en claro es la app, en su propio `POST /migrar`: el
+    plugin no puede —`storage` y `crypto` no están en `PLUGIN_PORTS`— y es
+    justamente la razón por la que esto es un pedido y no una implementación.
+
+    Lo de los secretos se decide acá y no en el endpoint porque el endpoint no
+    tiene con qué: su cuerpo es `{destino, que, plugin, coleccion, claves}` y
+    manda el item completo. Así que la única palanca es **qué claves se
+    mandan**, y como los campos `secret` se declaran por colección y no por
+    item, la regla que queda es simple: una colección con secretos se migra
+    entera o no se migra.
+    """
+    destino = _bot(ctx, ctx.params["destino"])
+    if isinstance(destino, ToolResult):
+        return destino
+    yo = _este_bot(ctx)
+    if isinstance(yo, ToolResult):
+        return yo
+
+    claves = ctx.params["claves"]
+    if isinstance(claves, str):
+        claves = [c.strip() for c in claves.split(",") if c.strip()]
+    if not claves:
+        return ToolResult.err("no se eligió nada para migrar")
+
+    que = ctx.params["que"]
+    plugin = str(ctx.params["plugin"]).strip()
+    coleccion = str(ctx.params["coleccion"]).strip()
+    incluir_secretos = bool(ctx.params["incluir_secretos"])
+
+    if que == "registros" and not (plugin and coleccion):
+        return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
+
+    if not incluir_secretos:
+        # `env` es secretos por definición; una colección, sólo si los declara.
+        if que == "env":
+            return ToolResult.err(
+                f"las {len(claves)} variables elegidas no se migraron: 'env' son secretos, y "
+                "migrarlos pisa el del otro lado sin poder saber si difería. "
+                "Marcá 'incluir secretos' si es lo que querés."
+            )
+        if que == "registros":
+            lectura = _items_de(ctx, yo, plugin, coleccion, exigir=True)
+            if isinstance(lectura, ToolResult):
+                return lectura
+            _, secretos, _ = lectura
+            if secretos:
+                return ToolResult.err(
+                    f"las {len(claves)} elegidas no se migraron: '{plugin}/{coleccion}' tiene "
+                    f"campos secretos ({', '.join(secretos)}) y se pisarían a ciegas — no sale "
+                    "por la API con qué compararlos. Marcá 'incluir secretos' si es lo que querés."
+                )
+
+    cuerpo = {
+        "destino": destino["url"], "que": que,
+        "plugin": plugin, "coleccion": coleccion, "claves": list(claves),
+    }
+    try:
+        respuesta, datos = _pedir(ctx, yo["url"], "/migrar", method="POST", payload=cuerpo)
+    except PortError as exc:
+        return ToolResult.err(f"este Bot no contestó en {yo['url']}: {exc}")
+    if not isinstance(datos, dict) or not respuesta.ok:
+        detalle = datos.get("detail") if isinstance(datos, dict) else respuesta.text[:300]
+        if isinstance(detalle, dict):
+            detalle = detalle.get("message") or json.dumps(detalle, ensure_ascii=False)
+        if respuesta.status == 404:
+            detalle = (
+                "este Bot tiene una versión de la app que no sabe migrar; "
+                "actualizalo desde Config → Actualizaciones"
+            )
+        return ToolResult.err(f"no se pudo migrar a '{destino['nombre']}': {detalle or respuesta.status}")
+
+    migrados = datos.get("migrados") or 0
+    fallados = datos.get("fallados") or 0
+    resultados = datos.get("resultados") or []
+    for r in resultados:
+        if isinstance(r, dict) and not r.get("ok"):
+            ctx.log(f"{r.get('clave')}: {r.get('error') or 'falló'}", level="warning")
+    salida = dict(migrados=migrados, fallados=fallados, resultados=resultados, destino=destino["nombre"])
+    if fallados:
+        return ToolResult.err(f"{fallados} de {migrados + fallados} no se migraron a '{destino['nombre']}'", **salida)
+    return ToolResult.ok(f"{migrados} migrado(s) a '{destino['nombre']}'", **salida)
+
+
 # ── Action: probar un Bot conocido ────────────────────────────────────────
 
 
@@ -698,7 +949,11 @@ def build_plugin() -> Plugin:
             FunctionTool(manifest=ESPERAR, fn=_esperar),
             FunctionTool(manifest=COMPARAR, fn=_comparar),
         ],
-        actions=[FunctionAction(action=MANIFEST.action("probar"), fn=_probar)],
+        actions=[
+            FunctionAction(action=MANIFEST.action("probar"), fn=_probar),
+            FunctionAction(action=COMPARAR_ACCION, fn=_comparar_accion),
+            FunctionAction(action=MIGRAR_ACCION, fn=_migrar),
+        ],
     )
 
 
