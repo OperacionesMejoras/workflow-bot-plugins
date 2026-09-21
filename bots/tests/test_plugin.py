@@ -459,7 +459,9 @@ def _accion(nombre, params, http, config=None):
             completos[p.name] = p.default if valor is None else valor
         return ToolContext(
             run_id="", case_id="", params=completos, extras={},
-            config=dict(config or CONFIG_YO), context={},
+            # `is None` y no `or`: un `{}` explícito es "sin configurar nada",
+            # que es justo el caso que se quiere probar.
+            config=dict(CONFIG_YO if config is None else config), context={},
             log=lambda m, level="info": registro.append(m),
             ports=ports or {}, resources=lambda c: BOTS if c == "bots" else [],
         )
@@ -614,6 +616,57 @@ def test_migrar_con_la_direccion_de_red_en_vez_de_loopback_explica_el_403():
 
     assert r.status == "err"
     assert "botsMiDireccion" in r.message and "127.0.0.1" in r.message
+
+
+def test_sin_configurar_nada_el_origen_es_el_bot_que_corre_no_el_8000(monkeypatch):
+    # El default era `http://127.0.0.1:8000` fijo, así que un Bot en otro
+    # puerto le hablaba a OTRA instalación: comparar informaba el contenido de
+    # otra máquina como propio, y migrar habría empujado el de la equivocada.
+    # Lo encontró la sesión de la app con dos Bots en 8101 y 8102.
+    monkeypatch.setenv("BOT_PORT", "8101")
+    api = "http://127.0.0.1:8101/api/core"
+    http = FakeHttp({
+        f"{api}/workflows": _json([_flujo("mío", "A")]),
+        f"{api}/workflows/{quote('mío', safe='')}": _json(_flujo("mío", "A")),
+        f"{API2}/workflows": _json([]),
+    })
+    r, _ = _accion("comparar", {"destino": "Impresión 2"}, http, config={})
+
+    assert r.status == "ok"
+    assert r.outputs["diff"]["origen"]["url"] == "http://127.0.0.1:8101"
+    assert r.outputs["solo_origen"] == ["mío"]
+
+
+def test_comparar_avisa_si_la_direccion_es_de_otra_instalacion(monkeypatch):
+    # Sólo avisa: comparar lee. Pero el informe habla de otra máquina, y los
+    # nombres de flujo ajenos se leen igual de plausibles que los propios.
+    monkeypatch.setenv("BOT_PORT", "8101")
+    http = _http_flujos(aca={"F": "A"}, alla={"F": "A"})
+    r, registro = _accion("comparar", {"destino": "Impresión 2"}, http, config=CONFIG_YO)
+
+    assert r.status == "ok"
+    assert any("instalación distinta" in m and "8101" in m for m in registro)
+
+
+def test_migrar_corta_si_la_direccion_es_de_otra_instalacion(monkeypatch):
+    # Acá no alcanza avisar: migrar empujaría el contenido de esa otra
+    # instalación al destino y le pisaría lo suyo.
+    monkeypatch.setenv("BOT_PORT", "8101")
+    http = FakeHttp()
+    r, _ = _accion("migrar", {"destino": "Impresión 2", "claves": ["F1"]}, http, config=CONFIG_YO)
+
+    assert r.status == "err"
+    assert "no se migró nada" in r.message and "8101" in r.message
+    assert http.calls == []
+
+
+def test_sin_bot_port_no_se_inventa_una_sospecha(monkeypatch):
+    # Fuera de la app —un test, el repo— no hay puerto propio con qué comparar.
+    monkeypatch.delenv("BOT_PORT", raising=False)
+    http = FakeHttp({f"{YO}/migrar": _json({"migrados": 1, "fallados": 0, "resultados": [{"clave": "F1", "ok": True}]})})
+    r, _ = _accion("migrar", {"destino": "Impresión 2", "claves": ["F1"]}, http, config=CONFIG_YO)
+
+    assert r.status == "ok"
 
 
 def test_migrar_sin_claves_es_err_antes_de_ir_a_la_red():

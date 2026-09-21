@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 from urllib.parse import quote
 
@@ -181,12 +182,13 @@ MANIFEST = PluginManifest(
             doc="Cuánto esperar cada respuesta HTTP del otro Bot.",
         ),
         Setting(
-            MI_DIRECCION, ParamType.STR, label="Dirección de este Bot", default="http://127.0.0.1:8000",
-            doc="Cómo este plugin le habla a su propio Bot: 'comparar' sin 'origen', y 'migrar'. Tiene "
-            "que ser loopback (http://127.0.0.1:<puerto>) y NO la dirección de red que da la bandeja "
-            "en 'Copiar dirección para otras PCs' — ésa es para que otros Bots te encuentren. Migrar "
-            "sólo se puede pedir desde la propia máquina, así que con la de red da 403. Cambiá sólo el "
-            "puerto, si esta instalación no escucha en el 8000.",
+            MI_DIRECCION, ParamType.STR, label="Dirección de este Bot",
+            doc="Normalmente va VACÍA: sola resuelve al Bot que está corriendo, en su puerto real. "
+            "Sólo se llena para un caso raro, y entonces tiene que ser loopback "
+            "(http://127.0.0.1:<puerto de ESTE Bot>). No poner la dirección de red que ofrece la "
+            "bandeja en 'Copiar dirección para otras PCs' —ésa es para que otros Bots lleguen acá, y "
+            "migrar sólo se puede pedir desde la propia máquina— ni el puerto de otra instalación de "
+            "esta misma PC, que sería comparar y migrar el contenido de otro Bot.",
         ),
     ),
     resources=(BOTS,),
@@ -291,14 +293,61 @@ def _es_loopback(url: str) -> bool:
     return host in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
+def _mi_puerto() -> str:
+    """
+    El puerto en el que escucha el Bot que está corriendo este plugin.
+
+    La app lo deja en el entorno al arrancar (`webapp/__main__.py`) y lo lee de
+    ahí para armar su propia URL (`core_api.py:_url_app`), así que esto es el
+    mecanismo de la casa y no una adivinanza. Leer `os.environ` no es saltarse
+    un port: no hay I/O que abstraer ni nada que mockear — es en qué proceso
+    estoy parado.
+
+    Vacío si la variable no está: el plugin puede correr fuera de la app (en un
+    test, o contra el repo), y ahí no hay un puerto propio que descubrir.
+    """
+    return (os.environ.get("BOT_PORT") or "").strip()
+
+
 def _este_bot(ctx: ToolContext) -> dict | ToolResult:
-    """Este Bot como si fuera uno de la colección, para poder comparar contra otro."""
-    url = str(ctx.config(MI_DIRECCION) or "http://127.0.0.1:8000").strip().rstrip("/")
+    """
+    Este Bot como si fuera uno de la colección, para poder comparar contra otro.
+
+    El default sale del puerto real y no de un 8000 fijo, y la diferencia no es
+    cosmética: con el 8000 fijo, un Bot que escucha en otro puerto le hablaba a
+    **otra instalación** —la que estuviera en el 8000—, así que `comparar`
+    informaba el contenido de otra máquina como si fuera el propio y `migrar`
+    habría empujado el de la instalación equivocada, pisando los flujos del
+    destino. Sin error visible: el informe parece correcto. Lo encontró la
+    sesión de la app probando con dos Bots en 8101 y 8102.
+    """
+    puerto = _mi_puerto()
+    url = str(ctx.config(MI_DIRECCION) or f"http://127.0.0.1:{puerto or '8000'}").strip().rstrip("/")
     if not _URL_VALIDA.match(url):
         return ToolResult.err(
             f"la configuración '{MI_DIRECCION}' no es http://ip:puerto: {url!r}"
         )
     return {"nombre": "este Bot", "url": url}
+
+
+def _no_es_este_bot(url: str) -> str:
+    """
+    Por qué esa dirección no es la del Bot que está corriendo esto, o "".
+
+    Sólo puede responder cuando la app dejó el puerto en el entorno; fuera de
+    la app —un test, el repo— no hay con qué comparar y se calla, en vez de
+    inventar una sospecha.
+    """
+    puerto = _mi_puerto()
+    if not puerto or not _es_loopback(url):
+        return ""
+    suyo = url.rsplit(":", 1)[-1].rstrip("/")
+    if suyo == puerto:
+        return ""
+    return (
+        f"la configuración '{MI_DIRECCION}' apunta a {url}, pero este Bot escucha en el "
+        f"puerto {puerto}: ese otro es una instalación distinta de la misma máquina"
+    )
 
 
 def _flujos_de(ctx: ToolContext, bot: dict) -> dict | ToolResult:
@@ -686,6 +735,11 @@ def _comparar(ctx: ToolContext) -> ToolResult:
         return origen
     if origen["url"] == destino["url"]:
         return ToolResult.err(f"'{origen['nombre']}' y '{destino['nombre']}' son el mismo Bot ({origen['url']})")
+    if not nombre_origen and (problema := _no_es_este_bot(origen["url"])):
+        # Aviso y no corte: comparar sólo lee. Pero el informe va a hablar de
+        # otra instalación, y sin esto no habría modo de notarlo — los nombres
+        # de flujo de otra máquina se leen igual de plausibles que los propios.
+        ctx.log(f"{problema}. El informe es de ESA instalación, no de este Bot", level="warning")
 
     que = ctx.params["que"]
     plugin = str(ctx.params["plugin"]).strip()
@@ -882,6 +936,15 @@ def _migrar(ctx: ToolContext) -> ToolResult:
     yo = _este_bot(ctx)
     if isinstance(yo, ToolResult):
         return yo
+    if problema := _no_es_este_bot(yo["url"]):
+        # Acá sí corta, al revés que en `comparar`: esto escribe. Con la
+        # dirección de otra instalación, migrar empuja el contenido de ESA al
+        # destino y le pisa lo suyo, sin que nada se vea mal en el camino.
+        return ToolResult.err(
+            f"no se migró nada: {problema}. Migrar desde acá empujaría el contenido de esa otra "
+            f"instalación a '{destino['nombre']}' y le pisaría lo suyo. Corregí la configuración "
+            f"(va http://127.0.0.1:{_mi_puerto()}) o dejala vacía, que ya resuelve sola."
+        )
 
     claves = ctx.params["claves"]
     if isinstance(claves, str):
