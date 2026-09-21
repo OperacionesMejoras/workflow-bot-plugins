@@ -182,8 +182,11 @@ MANIFEST = PluginManifest(
         ),
         Setting(
             MI_DIRECCION, ParamType.STR, label="Dirección de este Bot", default="http://127.0.0.1:8000",
-            doc="La usa 'comparar' cuando no se le da un 'origen': es este Bot. Cambiala sólo si esta "
-            "instalación no escucha en el puerto 8000.",
+            doc="Cómo este plugin le habla a su propio Bot: 'comparar' sin 'origen', y 'migrar'. Tiene "
+            "que ser loopback (http://127.0.0.1:<puerto>) y NO la dirección de red que da la bandeja "
+            "en 'Copiar dirección para otras PCs' — ésa es para que otros Bots te encuentren. Migrar "
+            "sólo se puede pedir desde la propia máquina, así que con la de red da 403. Cambiá sólo el "
+            "puerto, si esta instalación no escucha en el 8000.",
         ),
     ),
     resources=(BOTS,),
@@ -271,6 +274,21 @@ def _estado_de(ctx: ToolContext, bot: dict) -> dict | ToolResult:
         "ultimo_flujo": ultimo.get("flow") or "",
         "ultimo_caso": ultimo.get("case_id") or "",
     }
+
+
+def _es_loopback(url: str) -> bool:
+    """
+    Si esa dirección es la de la propia máquina.
+
+    Importa porque la app sólo contesta `/migrar` desde loopback, y este
+    setting lo escribe una persona que tiene a mano la dirección de red del
+    Bot —la bandeja la ofrece para copiar—. Con la de red, `comparar` anda
+    igual (lee `/workflows` y `/resources`, que no están acotados) y `migrar`
+    da 403: distinguirlo acá es lo que evita que ese 403 se lea como un
+    problema de emparejamiento.
+    """
+    host = url.split("//", 1)[-1].split(":")[0].split("/")[0].lower()
+    return host in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
 def _este_bot(ctx: ToolContext) -> dict | ToolResult:
@@ -904,6 +922,15 @@ def _migrar(ctx: ToolContext) -> ToolResult:
             detalle = (
                 "este Bot tiene una versión de la app que no sabe migrar; "
                 "actualizalo desde Config → Actualizaciones"
+            )
+        elif respuesta.status == 403 and not _es_loopback(yo["url"]):
+            # El 403 de la app habla de emparejar desde la propia máquina, que
+            # acá manda a mirar el lugar equivocado: lo que está mal es este
+            # setting, no el emparejamiento.
+            detalle = (
+                f"la configuración '{MI_DIRECCION}' apunta a {yo['url']}, que no es la propia "
+                "máquina. Migrar sólo se puede pedir desde el mismo Bot, así que ahí va "
+                "http://127.0.0.1:<puerto>; la dirección de red es para que OTROS Bots lleguen a éste"
             )
         return ToolResult.err(f"no se pudo migrar a '{destino['nombre']}': {detalle or respuesta.status}")
 

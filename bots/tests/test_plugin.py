@@ -600,6 +600,22 @@ def test_migrar_contra_una_app_sin_el_endpoint_dice_que_actualizar():
     assert "Actualizaciones" in r.message
 
 
+def test_migrar_con_la_direccion_de_red_en_vez_de_loopback_explica_el_403():
+    # La bandeja del Bot ofrece copiar su dirección de red, así que es fácil
+    # ponerla en el setting. Con ella `comparar` anda igual y `migrar` da 403,
+    # y el mensaje de la app manda a mirar el emparejamiento: el problema real
+    # es el setting.
+    red = "http://192.168.9.40:8000"
+    http = FakeHttp({f"{red}/api/core/migrar": _json({"detail": "Emparejar se hace desde el propio Bot"}, status=403)})
+    r, _ = _accion(
+        "migrar", {"destino": "Impresión 2", "claves": ["F1"]}, http,
+        config={"botsMiDireccion": red},
+    )
+
+    assert r.status == "err"
+    assert "botsMiDireccion" in r.message and "127.0.0.1" in r.message
+
+
 def test_migrar_sin_claves_es_err_antes_de_ir_a_la_red():
     http = FakeHttp()
     r, _ = _accion("migrar", {"destino": "Impresión 2", "claves": []}, http)
