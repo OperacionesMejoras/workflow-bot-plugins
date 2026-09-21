@@ -508,9 +508,10 @@ def test_la_accion_comparar_devuelve_la_vista_con_columnas_y_seleccion():
     assert "pisa" in seleccion["aviso"]
 
 
-def test_la_vista_de_una_coleccion_con_secretos_no_deja_elegir_nada():
-    # Una casilla que al tildarla no hace nada es peor que no tenerla: `migrar`
-    # no migra una colección con secretos sin que se lo pidan explícito.
+def test_la_vista_de_una_coleccion_con_secretos_deja_elegir_igual():
+    # Tildar una fila sí hace algo: el item viaja sin los campos secretos y el
+    # destino conserva los suyos, así que se corrige lo comparable sin pisarle
+    # el token al otro Bot. El aviso tiene que decir eso, no "no se puede".
     campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
     http = _http_items(
         aca=[{"nombre": "api", "token": None}, {"nombre": "otra", "token": None}],
@@ -525,11 +526,15 @@ def test_la_vista_de_una_coleccion_con_secretos_no_deja_elegir_nada():
 
     assert r.status == "ok"
     vista = r.outputs["vista"]
-    assert vista["seleccion"] is None
-    assert "token" in vista["aviso"] and "incluir secretos" in vista["aviso"]
-    assert all(f["_elegible"] is False for f in vista["filas"])
-    indeterminada = next(f for f in vista["filas"] if f["clave"] == "api")
-    assert "campos secretos" in indeterminada["_nota"]
+    assert vista["seleccion"]["params"]["incluir_secretos"] is False
+    aviso = vista["seleccion"]["aviso"]
+    assert "conserva los suyos" in aviso and "token" in aviso
+
+    por_clave = {f["clave"]: f for f in vista["filas"]}
+    assert por_clave["otra"].get("_elegible", True) is True  # solo_origen: se puede empujar
+    assert por_clave["api"].get("_elegible", True) is True   # indeterminado: también
+    # Y la nota dice qué va a pasar, no sólo qué no se sabe.
+    assert "no los toca" in por_clave["api"]["_nota"]
 
 
 def test_migrar_le_pide_a_su_propio_bot_y_manda_la_url_del_destino():
@@ -542,7 +547,7 @@ def test_migrar_le_pide_a_su_propio_bot_y_manda_la_url_del_destino():
     cuerpo = json.loads(http.calls[0]["body"])
     assert cuerpo == {
         "destino": "http://192.168.9.41:8000", "que": "flujos",
-        "plugin": "", "coleccion": "", "claves": ["F1", "F2"],
+        "plugin": "", "coleccion": "", "claves": ["F1", "F2"], "incluir_secretos": False,
     }
     # Y el pedido va a este Bot, que es el único que puede leer un secreto suyo.
     assert http.calls[0]["url"].startswith("http://127.0.0.1:8000")
@@ -558,42 +563,33 @@ def test_migrar_informa_los_que_fallaron_sin_perder_los_que_anduvieron():
     assert any("nombre inválido" in m for m in registro)
 
 
-def test_migrar_env_sin_pedir_secretos_no_migra_y_dice_cuantos():
-    r, _ = _accion("migrar", {"destino": "Impresión 2", "que": "env", "claves": ["A", "B"]}, FakeHttp())
+def test_migrar_no_corta_por_secretos_y_deja_que_la_app_decida():
+    # Un corte acá bloquearía dos casos que la app resuelve mejor: un item de
+    # colección viaja sin sus campos secretos y el destino conserva los suyos,
+    # y de `env` se omiten sólo las variables marcadas secretas — una no
+    # secreta se migra igual.
+    http = FakeHttp({f"{YO}/migrar": _json({"migrados": 1, "fallados": 1, "resultados": [
+        {"clave": "PUBLICA", "ok": True},
+        {"clave": "TOKEN", "ok": False, "error": '"TOKEN" es secreta y no se pidió incluir secretos: no se migró'},
+    ]})})
+    r, registro = _accion(
+        "migrar", {"destino": "Impresión 2", "que": "env", "claves": ["PUBLICA", "TOKEN"]}, http)
 
-    assert r.status == "err"
-    assert "las 2" in r.message and "incluir secretos" in r.message
-
-
-def test_migrar_una_coleccion_con_secretos_sin_pedirlos_no_migra():
-    # Los campos secret se declaran por colección, no por item: o se migra
-    # entera o no se migra.
-    campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
-    camino = "/resources/convertidor/plantillas"
-    http = FakeHttp({f"{YO}{camino}": _json({
-        "resource": {"key_field": "nombre", "fields": campos}, "items": [{"nombre": "api"}]})})
-    r, _ = _accion("migrar", {
-        "destino": "Impresión 2", "que": "registros", "plugin": "convertidor",
-        "coleccion": "plantillas", "claves": ["api"]}, http)
-
-    assert r.status == "err"
-    assert "token" in r.message and "a ciegas" in r.message
-    # No llegó a pedir la migración: sólo leyó la definición.
-    assert not any("/migrar" in c["url"] for c in http.calls)
+    assert r.status == "err"  # una falló, y el informe dice cuál y por qué
+    assert (r.outputs["migrados"], r.outputs["fallados"]) == (1, 1)
+    assert any("no se migró" in m for m in registro)
+    assert json.loads(http.calls[0]["body"])["incluir_secretos"] is False
 
 
-def test_migrar_con_incluir_secretos_si_migra():
-    campos = [{"name": "nombre", "secret": False}, {"name": "token", "secret": True}]
-    camino = "/resources/convertidor/plantillas"
-    http = FakeHttp({
-        f"{YO}{camino}": _json({"resource": {"key_field": "nombre", "fields": campos}, "items": []}),
-        f"{YO}/migrar": _json({"migrados": 1, "fallados": 0, "resultados": [{"clave": "api", "ok": True}]}),
-    })
+def test_migrar_pasa_incluir_secretos_cuando_se_lo_piden():
+    http = FakeHttp({f"{YO}/migrar": _json(
+        {"migrados": 1, "fallados": 0, "resultados": [{"clave": "api", "ok": True}]})})
     r, _ = _accion("migrar", {
         "destino": "Impresión 2", "que": "registros", "plugin": "convertidor",
         "coleccion": "plantillas", "claves": ["api"], "incluir_secretos": True}, http)
 
     assert r.status == "ok" and r.outputs["migrados"] == 1
+    assert json.loads(http.calls[0]["body"])["incluir_secretos"] is True
 
 
 def test_migrar_contra_una_app_sin_el_endpoint_dice_que_actualizar():

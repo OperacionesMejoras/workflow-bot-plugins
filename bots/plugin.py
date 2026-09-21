@@ -58,11 +58,18 @@ cada corrida y se guardaría en la base con cada una, sin que ningún flujo la
 lea. Las dos salen de la misma función, así que no pueden divergir.
 
 Los campos secretos quedan **afuera de una migración** salvo que se los pida
-explícito, y el motivo es el caso desatendido: un flujo corre cada vez, así que
-si alguien rotó ese secreto en el destino, la corrida siguiente lo revierte al
-valor viejo, y la otra también. Como los campos `secret` se declaran por
-colección y no por item, la regla que queda es simple: una colección con
-secretos se migra entera o no se migra.
+explícito (`incluir_secretos`, default false), y el motivo es el caso
+desatendido: un flujo corre cada vez, así que si alguien rotó ese secreto en el
+destino, la corrida siguiente lo revierte al valor viejo, y la otra también.
+Afuera no significa que el item no viaje: viaja con esos campos en `None` y el
+destino conserva los suyos, así que se puede corregir la url de una conexión
+sin pisarle el token al otro Bot. De `env` se omiten sólo las variables
+marcadas secretas —una variable *es* su valor, no hay forma de mandarla sin
+él—, y el informe nombra cada una con el motivo.
+
+Qué se puede pisar no lo decide este plugin: lo decide la app, que es la única
+que puede leer un secreto de su propia instalación. Por eso `migrar` no chequea
+nada de esto antes de pedir — cortar acá bloquearía los dos casos de arriba.
 
 Lo que este plugin NO resuelve, a propósito: la carrera entre dos Bots que
 miran la misma lista y quieren el mismo caso. Sondear "qué hace el otro" no
@@ -747,7 +754,13 @@ def _comparar(ctx: ToolContext) -> ToolResult:
 _ESTADOS_MIGRABLES = frozenset({"distinto", "solo_origen", "indeterminado"})
 
 _NOTAS = {
-    "indeterminado": "tiene campos secretos: no se puede saber si difieren",
+    # Dice qué va a pasar, no sólo qué no se puede saber: con los secretos
+    # afuera el item se migra igual y el otro Bot conserva el suyo, así que
+    # "no se puede comparar" sin esa mitad se lee como "no se puede migrar".
+    "indeterminado": (
+        "tiene campos secretos: no se puede saber si difieren. Migrarlo no los toca — "
+        "el otro Bot conserva los suyos"
+    ),
     "solo_destino": "está sólo en el destino; migrar no lo borra de allá",
 }
 
@@ -760,12 +773,13 @@ def _vista_de(diff: dict, destino_bot: str) -> dict:
     por colección — es justo el motivo por el que esto va en el resultado y no
     en el manifest.
 
-    Ninguna fila queda elegible si la colección tiene campos secretos: el botón
-    mandaría claves que `migrar` no va a migrar (excluye secretos salvo que se
-    los pidan), y una casilla que no hace nada al tildarla es peor que no
-    tenerla. Para eso está la acción `migrar` directa, con la casilla explícita.
+    Una colección con campos secretos se puede elegir igual: con
+    `incluir_secretos` en false el item viaja sin ellos y el destino conserva
+    los suyos, así que tildar una fila **sí** hace algo —corrige lo comparable
+    y deja el secreto de la otra punta donde está—. El botón manda
+    `incluir_secretos: false`; para pisarlos hay que ir a la acción `migrar`,
+    que tiene la casilla.
     """
-    hay_secretos = bool(diff["campos_secretos"])
     es_flujo = diff["que"] == "flujos"
 
     filas = []
@@ -775,15 +789,23 @@ def _vista_de(diff: dict, destino_bot: str) -> dict:
             "estado": item["estado"],
             "campos": ", ".join(item["campos"]),
         }
-        elegible = item["estado"] in _ESTADOS_MIGRABLES and not hay_secretos
-        if not elegible:
+        if item["estado"] not in _ESTADOS_MIGRABLES:
             fila["_elegible"] = False
         nota = _NOTAS.get(item["estado"], "")
         if nota:
             fila["_nota"] = nota
         filas.append(fila)
 
-    vista = {
+    plugin, _, coleccion = diff["coleccion"].partition("/")
+    aviso = "Migrar escribe en el otro Bot y pisa lo que haya con ese nombre. No borra nada de allá que no esté acá."
+    if diff["campos_secretos"]:
+        aviso += (
+            f" Los campos secretos ({', '.join(diff['campos_secretos'])}) no se migran: "
+            "el otro Bot conserva los suyos. Para pisarlos, la acción 'Migrar' con "
+            "'incluir secretos' marcado."
+        )
+
+    return {
         "tipo": "tabla",
         "clave": "clave",
         "columnas": [
@@ -792,35 +814,20 @@ def _vista_de(diff: dict, destino_bot: str) -> dict:
             {"campo": "campos", "label": "Qué difiere"},
         ],
         "filas": filas,
-    }
-
-    if hay_secretos:
-        vista["seleccion"] = None
-        vista["aviso"] = (
-            f"Esta colección tiene campos secretos ({', '.join(diff['campos_secretos'])}), "
-            "que no salen por la API: no se puede saber si difieren ni migrarlos desde acá. "
-            "Para moverlos, la acción 'Migrar' con 'incluir secretos' marcado."
-        )
-        return vista
-
-    plugin, _, coleccion = diff["coleccion"].partition("/")
-    vista["seleccion"] = {
-        "accion": "migrar",
-        "param": "claves",
-        "params": {
-            "destino": destino_bot,
-            "que": diff["que"],
-            "plugin": plugin,
-            "coleccion": coleccion,
-            "incluir_secretos": False,
+        "seleccion": {
+            "accion": "migrar",
+            "param": "claves",
+            "params": {
+                "destino": destino_bot,
+                "que": diff["que"],
+                "plugin": plugin,
+                "coleccion": coleccion,
+                "incluir_secretos": False,
+            },
+            "etiqueta": f"Migrar lo elegido a {destino_bot}",
+            "aviso": aviso,
         },
-        "etiqueta": f"Migrar lo elegido a {destino_bot}",
-        "aviso": (
-            "Migrar escribe en el otro Bot y pisa lo que haya con ese nombre. "
-            "No borra nada de allá que no esté acá."
-        ),
     }
-    return vista
 
 
 def _comparar_accion(ctx: ToolContext) -> ToolResult:
@@ -872,29 +879,18 @@ def _migrar(ctx: ToolContext) -> ToolResult:
     if que == "registros" and not (plugin and coleccion):
         return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
 
-    if not incluir_secretos:
-        # `env` es secretos por definición; una colección, sólo si los declara.
-        if que == "env":
-            return ToolResult.err(
-                f"las {len(claves)} variables elegidas no se migraron: 'env' son secretos, y "
-                "migrarlos pisa el del otro lado sin poder saber si difería. "
-                "Marcá 'incluir secretos' si es lo que querés."
-            )
-        if que == "registros":
-            lectura = _items_de(ctx, yo, plugin, coleccion, exigir=True)
-            if isinstance(lectura, ToolResult):
-                return lectura
-            _, secretos, _ = lectura
-            if secretos:
-                return ToolResult.err(
-                    f"las {len(claves)} elegidas no se migraron: '{plugin}/{coleccion}' tiene "
-                    f"campos secretos ({', '.join(secretos)}) y se pisarían a ciegas — no sale "
-                    "por la API con qué compararlos. Marcá 'incluir secretos' si es lo que querés."
-                )
-
+    # Sin chequeo previo de secretos a propósito. La app resuelve el caso mejor
+    # de lo que podría acá: con `incluir_secretos` en false, un item de
+    # colección **viaja igual** con sus campos secretos en `None` y el destino
+    # conserva los suyos —se puede corregir la url de una conexión sin pisarle
+    # el token al otro Bot—, y de `env` omite sólo las variables marcadas
+    # secretas, nombrando cada una en el informe. Cortar acá por "tiene
+    # secretos" bloquearía las dos cosas, incluida una variable `env` no
+    # secreta, que se migra sin problema.
     cuerpo = {
         "destino": destino["url"], "que": que,
         "plugin": plugin, "coleccion": coleccion, "claves": list(claves),
+        "incluir_secretos": incluir_secretos,
     }
     try:
         respuesta, datos = _pedir(ctx, yo["url"], "/migrar", method="POST", payload=cuerpo)
