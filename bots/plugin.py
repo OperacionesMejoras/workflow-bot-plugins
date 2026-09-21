@@ -825,6 +825,18 @@ def _comparar(ctx: ToolContext) -> ToolResult:
 # `solo_destino` tampoco: no existe acá, y migrar no borra del otro lado.
 _ESTADOS_MIGRABLES = frozenset({"distinto", "solo_origen", "indeterminado"})
 
+# Para la columna Estado. En la tabla van leídos y no con el nombre interno:
+# `solo_destino` al lado de `igual` se ve como un dato de máquina metido entre
+# palabras. Los valores crudos siguen estando en `diff.items` y en las listas
+# planas del tool, que es lo que lee un flujo — acá es presentación.
+_ETIQUETAS_ESTADO = {
+    "igual": "igual",
+    "distinto": "distinto",
+    "solo_origen": "sólo en este Bot",
+    "solo_destino": "sólo en el destino",
+    "indeterminado": "indeterminado",
+}
+
 _NOTAS = {
     # Dice qué va a pasar, no sólo qué no se puede saber: con los secretos
     # afuera el item se migra igual y el otro Bot conserva el suyo, así que
@@ -858,7 +870,7 @@ def _vista_de(diff: dict, destino_bot: str) -> dict:
     for item in diff["items"]:
         fila = {
             "clave": item["clave"],
-            "estado": item["estado"],
+            "estado": _ETIQUETAS_ESTADO.get(item["estado"], item["estado"]),
             "campos": ", ".join(item["campos"]),
         }
         if item["estado"] not in _ESTADOS_MIGRABLES:
@@ -1003,7 +1015,29 @@ def _migrar(ctx: ToolContext) -> ToolResult:
     for r in resultados:
         if isinstance(r, dict) and not r.get("ok"):
             ctx.log(f"{r.get('clave')}: {r.get('error') or 'falló'}", level="warning")
-    salida = dict(migrados=migrados, fallados=fallados, resultados=resultados, destino=destino["nombre"])
+
+    # Una tabla también acá: el resultado de esto es "qué entró y qué no", y de
+    # los que no entraron importa el motivo. Sin `seleccion`, porque no hay un
+    # paso siguiente — es el final del camino, no una elección.
+    vista = {
+        "tipo": "tabla",
+        "clave": "clave",
+        "columnas": [
+            {"campo": "clave", "label": "Nombre"},
+            {"campo": "resultado", "label": "Resultado"},
+        ],
+        "filas": [
+            {
+                "clave": r.get("clave", ""),
+                "resultado": "migrado" if r.get("ok") else (r.get("error") or "no se pudo migrar"),
+            }
+            for r in resultados if isinstance(r, dict)
+        ],
+    }
+    salida = dict(
+        migrados=migrados, fallados=fallados, resultados=resultados,
+        destino=destino["nombre"], vista=vista,
+    )
     if fallados:
         return ToolResult.err(f"{fallados} de {migrados + fallados} no se migraron a '{destino['nombre']}'", **salida)
     return ToolResult.ok(f"{migrados} migrado(s) a '{destino['nombre']}'", **salida)

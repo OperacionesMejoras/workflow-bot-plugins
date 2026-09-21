@@ -491,6 +491,13 @@ def test_la_accion_comparar_devuelve_la_vista_con_columnas_y_seleccion():
     assert vista["tipo"] == "tabla" and vista["clave"] == "clave"
     assert [c["campo"] for c in vista["columnas"]] == ["estado", "clave", "campos"]
 
+    # La columna Estado va leída: `solo_destino` al lado de `igual` se ve como
+    # un dato de máquina metido entre palabras. Los valores crudos siguen en
+    # `diff.items` y en las listas planas, que es lo que lee un flujo.
+    assert {f["estado"] for f in vista["filas"]} == {
+        "igual", "distinto", "sólo en este Bot", "sólo en el destino",
+    }
+
     por_clave = {f["clave"]: f for f in vista["filas"]}
     # Elegible sólo lo que se puede empujar: no un igual, no algo que está
     # sólo del otro lado (no existe acá, y migrar no borra de allá).
@@ -563,6 +570,11 @@ def test_migrar_informa_los_que_fallaron_sin_perder_los_que_anduvieron():
     assert r.status == "err"
     assert (r.outputs["migrados"], r.outputs["fallados"]) == (1, 1)
     assert any("nombre inválido" in m for m in registro)
+    # Y el resultado también sale como tabla, con el motivo de cada uno que no
+    # entró: sin esto, la pantalla muestra el JSON crudo de los outputs.
+    filas = {f["clave"]: f["resultado"] for f in r.outputs["vista"]["filas"]}
+    assert filas == {"F1": "migrado", "F2": "nombre inválido"}
+    assert "seleccion" not in r.outputs["vista"]  # es el final del camino
 
 
 def test_migrar_no_corta_por_secretos_y_deja_que_la_app_decida():
