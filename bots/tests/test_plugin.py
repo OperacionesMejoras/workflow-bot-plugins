@@ -358,16 +358,49 @@ def test_comparar_registros_sin_plugin_ni_coleccion_es_err():
     assert r.status == "err" and "'plugin' y 'coleccion'" in r.message
 
 
-def test_comparar_contra_un_bot_sin_ese_plugin_explica_que_revisar():
+def test_comparar_contra_un_bot_sin_ese_plugin_no_falla_es_todo_solo_origen():
+    # Un Bot nuevo de la flota no tiene nada instalado. Que le falte el plugin
+    # es la respuesta —"no tiene ninguno de estos"—, no una falla: un tool que
+    # se cae por lo que allá no está rompe justo por lo que no está.
     camino = "/resources/convertidor/plantillas"
+    definicion = {"key_field": "nombre", "fields": [{"name": "nombre", "secret": False}]}
     http = FakeHttp({
-        f"{YO}{camino}": _json({"resource": {"key_field": "nombre", "fields": []}, "items": []}),
+        f"{YO}{camino}": _json({"resource": definicion, "items": [{"nombre": "cnc3"}, {"nombre": "kuka"}]}),
         f"{API2}{camino}": _json({"detail": "no hay una coleccion plantillas"}, status=404),
+    })
+    r, registro = _comparar(http, que="registros", plugin="convertidor", coleccion="plantillas")
+
+    assert r.status == "ok"
+    assert r.outputs["solo_origen"] == ["cnc3", "kuka"]
+    assert r.outputs["hay_diferencias"] == "si"
+    # Y se distingue de "la tiene pero está vacía", que significa otra cosa.
+    assert r.outputs["diff"]["destino_sin_coleccion"] is True
+    assert any("no tiene la colección" in m for m in registro)
+
+
+def test_comparar_una_coleccion_vacia_en_destino_no_es_lo_mismo_que_no_tenerla():
+    camino = "/resources/convertidor/plantillas"
+    definicion = {"key_field": "nombre", "fields": [{"name": "nombre", "secret": False}]}
+    http = FakeHttp({
+        f"{YO}{camino}": _json({"resource": definicion, "items": [{"nombre": "cnc3"}]}),
+        f"{API2}{camino}": _json({"resource": definicion, "items": []}),
     })
     r, _ = _comparar(http, que="registros", plugin="convertidor", coleccion="plantillas")
 
+    assert r.status == "ok"
+    assert r.outputs["solo_origen"] == ["cnc3"]
+    assert r.outputs["diff"]["destino_sin_coleccion"] is False
+
+
+def test_comparar_una_coleccion_que_este_bot_no_tiene_si_es_err():
+    # Del lado del origen sí corta: casi siempre es un nombre mal escrito, y no
+    # hay nada que comparar *desde*. Un informe vacío parecería una respuesta.
+    camino = "/resources/convertidor/platillas"
+    http = FakeHttp({f"{YO}{camino}": _json({"detail": "no existe"}, status=404)})
+    r, _ = _comparar(http, que="registros", plugin="convertidor", coleccion="platillas")
+
     assert r.status == "err"
-    assert "Impresión 2" in r.message and "convertidor" in r.message
+    assert "convertidor" in r.message and "platillas" in r.message
 
 
 def test_comparar_el_mismo_bot_de_los_dos_lados_es_err_antes_de_ir_a_la_red():

@@ -31,14 +31,19 @@ Existe porque mover un flujo o una plantilla de un Bot a otro hoy se hace a
 mano, y lo primero que hace falta para hacerlo sin pisar nada es ver qué
 cambia. Sólo lee: no copia nada.
 
-Lo que `comparar` NO puede ver, y por qué importa: un campo que la colección
-declaró `secret` no sale por la API (`workflow-bot-app#3`), así que dos items
-cuyos campos visibles son todos iguales pueden diferir justo en el secreto.
-Por eso hay un estado `indeterminado` además de `igual`: decir "igual" ahí
-sería mentir. La migración completa —elegir qué pisar, y los secretos— es una
+Lo que `comparar` NO puede ver, y por qué importa: los campos que una colección
+declaró `secret` vuelven tapados, así que dos items cuyos campos visibles son
+todos iguales pueden diferir justo en el secreto. Por eso hay un estado
+`indeterminado` además de `igual`: decir "igual" ahí sería afirmar algo que no
+se puede ver. La migración completa —elegir qué pisar, y los secretos— es una
 pantalla de la app, no un flujo: un plugin no puede pedirle nada a la base
 (`storage` y `crypto` son ports del núcleo) ni dibujar una pantalla (sólo
 declara colecciones y botones).
+
+Tampoco asume que del otro lado haya un plugin instalado, sólo que hay un Bot:
+si el destino no tiene la colección que se le pide, eso es un resultado —todo
+lo de acá queda como "sólo en el origen"— y no una falla. Es el caso de un Bot
+nuevo de la flota, que todavía no tiene nada.
 
 Lo que este plugin NO resuelve, a propósito: la carrera entre dos Bots que
 miran la misma lista y quieren el mismo caso. Sondear "qué hace el otro" no
@@ -243,13 +248,26 @@ def _flujos_de(ctx: ToolContext, bot: dict) -> dict | ToolResult:
     return flujos
 
 
-def _items_de(ctx: ToolContext, bot: dict, plugin: str, coleccion: str) -> tuple[dict, list, str] | ToolResult:
+def _items_de(
+    ctx: ToolContext, bot: dict, plugin: str, coleccion: str, *, exigir: bool,
+) -> tuple[dict, list, str] | ToolResult:
     """
     ({clave: item}, campos secretos, campo clave) de una colección de un Bot.
 
     Los campos `secret` salen de la definición que la propia respuesta trae, no
     de una lista escrita acá: cualquier plugin instalado en el otro Bot los
     declara en su manifest y el endpoint los publica.
+
+    `exigir` distingue los dos lados, y no es simetría mal hecha:
+
+    - En el **origen** va True: pedir una colección que este Bot no tiene es,
+      casi siempre, un nombre mal escrito, y además no hay nada que comparar
+      *desde*. Vale más un error que un informe vacío que parece una respuesta.
+    - En el **destino** va False: que el otro Bot no tenga el plugin es un
+      resultado, no una falla —"no tiene ninguno de estos, todos habría que
+      copiarlos"—, y es justo el caso de un Bot nuevo de la flota, que no tiene
+      nada instalado todavía. Un tool que se cae porque allá falta un plugin
+      rompe por lo que no está, que es lo que no tiene que pasar.
     """
     camino = f"/resources/{quote(plugin, safe='')}/{quote(coleccion, safe='')}"
     try:
@@ -258,10 +276,17 @@ def _items_de(ctx: ToolContext, bot: dict, plugin: str, coleccion: str) -> tuple
         return ToolResult.err(f"'{bot['nombre']}' no responde en {bot['url']}: {exc}")
     if not respuesta.ok or not isinstance(datos, dict):
         detalle = datos.get("detail") if isinstance(datos, dict) else respuesta.text[:200]
-        return ToolResult.err(
-            f"'{bot['nombre']}' respondió {respuesta.status} a {camino}: {detalle or 'sin detalle'}. "
-            f"¿Tiene instalado el plugin '{plugin}' con la colección '{coleccion}'?"
+        if exigir:
+            return ToolResult.err(
+                f"'{bot['nombre']}' respondió {respuesta.status} a {camino}: {detalle or 'sin detalle'}. "
+                f"¿Tiene instalado el plugin '{plugin}' con la colección '{coleccion}'?"
+            )
+        ctx.log(
+            f"{bot['nombre']} no tiene la colección '{plugin}/{coleccion}' "
+            f"({respuesta.status}): todo lo de acá queda como 'sólo en el origen'",
+            level="warning",
         )
+        return {}, [], ""
 
     definicion = datos.get("resource") or {}
     campos = definicion.get("fields") or []
@@ -579,6 +604,7 @@ def _comparar(ctx: ToolContext) -> ToolResult:
     plugin = str(ctx.params["plugin"]).strip()
     coleccion = str(ctx.params["coleccion"]).strip()
     secretos: list = []
+    destino_sin_coleccion = False
 
     if que == "flujos":
         datos_origen = _flujos_de(ctx, origen)
@@ -591,14 +617,16 @@ def _comparar(ctx: ToolContext) -> ToolResult:
     else:
         if not plugin or not coleccion:
             return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
-        lectura_origen = _items_de(ctx, origen, plugin, coleccion)
+        lectura_origen = _items_de(ctx, origen, plugin, coleccion, exigir=True)
         if isinstance(lectura_origen, ToolResult):
             return lectura_origen
-        lectura_destino = _items_de(ctx, destino, plugin, coleccion)
+        lectura_destino = _items_de(ctx, destino, plugin, coleccion, exigir=False)
         if isinstance(lectura_destino, ToolResult):
             return lectura_destino
         datos_origen, secretos, _ = lectura_origen
-        datos_destino, secretos_destino, _ = lectura_destino
+        datos_destino, secretos_destino, clave_destino = lectura_destino
+        # Sin campo clave: el destino no tiene la colección (ver `_items_de`).
+        destino_sin_coleccion = not clave_destino
         # La unión: si un lado declara un campo secreto que el otro no, igual no
         # se puede comparar. Pasa con dos versiones distintas del mismo plugin.
         secretos = sorted(set(secretos) | set(secretos_destino))
@@ -617,6 +645,11 @@ def _comparar(ctx: ToolContext) -> ToolResult:
         "destino": {"bot": destino["nombre"], "url": destino["url"]},
         "que": que,
         "coleccion": f"{plugin}/{coleccion}" if que == "registros" else "",
+        # Siempre presente, como `campos_secretos`: quien lo renderiza no tiene
+        # que distinguir "no pasó" de "no me lo dijeron". True = el destino no
+        # tiene ese plugin/colección, así que el vacío de allá no significa
+        # "colección vacía" sino "ni siquiera la tiene".
+        "destino_sin_coleccion": destino_sin_coleccion,
         "campos_comparados": comparados,
         "campos_secretos": secretos,
         "items": items,
