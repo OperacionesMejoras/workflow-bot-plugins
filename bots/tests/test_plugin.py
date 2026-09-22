@@ -868,3 +868,34 @@ def test_comparar_tambien_acepta_los_nombres_de_pantalla():
     # Y pidió el catálogo a este Bot, no al destino.
     tools = [c["url"] for c in http.calls if c["url"].endswith("/tools")]
     assert tools == [f"{YO}/tools"]
+
+
+def test_los_params_que_nombran_otro_plugin_dicen_de_donde_salen_sus_opciones():
+    # core#32: `plugin` y `coleccion` nombran una colección de OTRO plugin, así
+    # que no hay un Resource propio al que apuntar; el núcleo expone para eso
+    # el namespace `core:` (desde v0.3.1-beta.11).
+    #
+    # Las cadenas exactas se fijan acá porque `registry` valida la sintaxis y
+    # el placeholder, pero NO el namespace: su regex es
+    # ^core:[\w-]+(?::\{(\w+)\})?$, así que un `core:pluggins` pasaría el
+    # chequeo de carga y se vería recién como un buscador vacío.
+    plugin = build_plugin()
+    declaraciones = [(a.name, a.params) for a in plugin.manifest.actions]
+    declaraciones += [(t.manifest.id, t.manifest.params) for t in plugin.tools]
+
+    revisadas = []
+    for dueño, params in declaraciones:
+        por_nombre = {p.name: p for p in params}
+        if "plugin" not in por_nombre or "coleccion" not in por_nombre:
+            continue
+        revisadas.append(dueño)
+        assert por_nombre["plugin"].options_from == "core:plugins", dueño
+        assert por_nombre["coleccion"].options_from == "core:resources:{plugin}", dueño
+        # La regla que el núcleo valida al cargar, replicada acá para que valga
+        # también contra un core viejo: el placeholder nombra un param real de
+        # ESTA declaración —no del plugin—, por `name` o por alias.
+        validos = {p.name for p in params} | {a for p in params for a in p.aliases}
+        assert "plugin" in validos, dueño
+
+    # migrar (Action), comparar (Action) y comparar (tool): las tres.
+    assert sorted(revisadas) == ["bots.comparar", "comparar", "migrar"]

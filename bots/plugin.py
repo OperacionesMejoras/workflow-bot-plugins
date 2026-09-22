@@ -154,12 +154,12 @@ COMPARAR_ACCION = Action(
             "para ésas está la acción 'Migrar'.",
         ),
         Param(
-            "plugin", default="",
+            "plugin", default="", options_from="core:plugins",
             doc="Sólo con que=registros: de qué plugin es la colección. Va como figura en Plugins "
             "('Connections') o su nombre interno ('connections'), el que tengas a mano.",
         ),
         Param(
-            "coleccion", default="",
+            "coleccion", default="", options_from="core:resources:{plugin}",
             doc="Sólo con que=registros: qué colección de ese plugin, por el título que muestra la "
             "pantalla ('Sources') o su nombre interno ('sources'). Si no existe, el error te lista "
             "las que hay.",
@@ -189,12 +189,12 @@ MIGRAR_ACCION = Action(
             "(hay que llenar 'plugin' y 'coleccion'). 'env' = variables de entorno.",
         ),
         Param(
-            "plugin", default="",
+            "plugin", default="", options_from="core:plugins",
             doc="Sólo con que=registros: de qué plugin es la colección. Va como figura en Plugins "
             "('Connections') o su nombre interno ('connections'), el que tengas a mano.",
         ),
         Param(
-            "coleccion", default="",
+            "coleccion", default="", options_from="core:resources:{plugin}",
             doc="Sólo con que=registros: qué colección de ese plugin, por el título que muestra la "
             "pantalla ('Sources') o su nombre interno ('sources'). Si no existe, el error te lista "
             "las que hay.",
@@ -857,8 +857,8 @@ COMPARAR = ToolManifest(
         Param("destino", required=True, options_from="bots", doc="Nombre en Bots conocidos: contra quién comparar."),
         Param("origen", default="", options_from="bots", doc="Vacío: este Bot (ver la configuración 'Dirección de este Bot')."),
         Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros"), doc="'flujos' o 'registros' (los items de una colección)."),
-        Param("plugin", default="", doc="Sólo con que=registros: de qué plugin es la colección, por su título en Plugins ('Connections') o su nombre interno ('connections')."),
-        Param("coleccion", default="", doc="Sólo con que=registros: qué colección, por el título de la pantalla ('Sources') o su nombre interno ('sources')."),
+        Param("plugin", default="", options_from="core:plugins", doc="Sólo con que=registros: de qué plugin es la colección, por su título en Plugins ('Connections') o su nombre interno ('connections')."),
+        Param("coleccion", default="", options_from="core:resources:{plugin}", doc="Sólo con que=registros: qué colección, por el título de la pantalla ('Sources') o su nombre interno ('sources')."),
         Param("detalle", ParamType.BOOL, default=False, doc="Agregar a cada item distinto los valores de origen y destino."),
     ),
     outputs=(

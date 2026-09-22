@@ -9,6 +9,6 @@
   ],
   "maintainer": "OperacionesMejoras",
   "repo_url": "https://github.com/OperacionesMejoras/workflow-bot-plugins",
-  "compatible_core": ">=0.3.0b4",
+  "compatible_core": ">=0.3.1b11",
   "license": "MIT"
 }
