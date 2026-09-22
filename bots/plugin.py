@@ -155,13 +155,14 @@ COMPARAR_ACCION = Action(
         ),
         Param(
             "plugin", default="",
-            doc="Sólo con que=registros: de qué plugin es la colección, como figura en Plugins. "
-            "Ej.: convertidor",
+            doc="Sólo con que=registros: de qué plugin es la colección. Va como figura en Plugins "
+            "('Connections') o su nombre interno ('connections'), el que tengas a mano.",
         ),
         Param(
             "coleccion", default="",
-            doc="Sólo con que=registros: qué colección de ese plugin. Es el nombre interno, no el "
-            "título de la pantalla. Ej.: plantillas",
+            doc="Sólo con que=registros: qué colección de ese plugin, por el título que muestra la "
+            "pantalla ('Sources') o su nombre interno ('sources'). Si no existe, el error te lista "
+            "las que hay.",
         ),
     ),
 )
@@ -189,13 +190,14 @@ MIGRAR_ACCION = Action(
         ),
         Param(
             "plugin", default="",
-            doc="Sólo con que=registros: de qué plugin es la colección, como figura en Plugins. "
-            "Ej.: convertidor",
+            doc="Sólo con que=registros: de qué plugin es la colección. Va como figura en Plugins "
+            "('Connections') o su nombre interno ('connections'), el que tengas a mano.",
         ),
         Param(
             "coleccion", default="",
-            doc="Sólo con que=registros: qué colección de ese plugin. Es el nombre interno, no el "
-            "título de la pantalla. Ej.: plantillas",
+            doc="Sólo con que=registros: qué colección de ese plugin, por el título que muestra la "
+            "pantalla ('Sources') o su nombre interno ('sources'). Si no existe, el error te lista "
+            "las que hay.",
         ),
         Param(
             "claves", ParamType.JSON, default=[], required=True,
@@ -262,6 +264,112 @@ def _bot(ctx: ToolContext, nombre: str):
     if not _URL_VALIDA.match(url):
         return ToolResult.err(f"la dirección de '{nombre}' no es http://ip:puerto: {url!r}")
     return {**bot, "url": url}
+
+
+# ── Nombres de pantalla vs nombres internos ─────────────────────────────
+
+def _listado(opciones: dict[str, str]) -> str:
+    """Los internos, y entre paréntesis el label cuando no es el mismo."""
+    partes = [
+        f"{nombre} ({label})" if label and label.lower() != nombre.lower() else nombre
+        for nombre, label in sorted(opciones.items())
+    ]
+    return ", ".join(partes) or "ninguno"
+
+
+def _interno(escrito: str, opciones: dict[str, str], que: str, donde: str = ""):
+    """
+    El nombre interno de algo que se pudo haber escrito como lo muestra la
+    pantalla. `opciones` es {nombre interno: label}.
+
+    Desde la pantalla del plugin el label es lo ÚNICO que se ve: el nombre
+    interno no figura en ninguna parte de la UI. Pedirlo era pedir un dato que
+    no está a la vista, y escribir lo que sí se ve —'Connections', 'Sources'—
+    fallaba con "1 de 1 no se migraron", sin decir cuál de los campos.
+
+    Bajar todo a minúsculas no alcanza: la colección de ESTE plugin se llama
+    `bots` y la pantalla la muestra como 'Bots conocidos'. Por eso se resuelve
+    contra los dos nombres, y el interno gana — si alguien llamó a su plugin
+    igual que el label de otro, lo que escribió literal es lo que quiso.
+    """
+    escrito = (escrito or "").strip()
+    if escrito in opciones:
+        return escrito
+    bajo = escrito.lower()
+    if exactos := [n for n in opciones if n.lower() == bajo]:
+        return exactos[0]
+    por_label = [n for n, label in opciones.items() if label.lower() == bajo]
+    if len(por_label) == 1:
+        return por_label[0]
+    if len(por_label) > 1:
+        # Elegir uno sería migrar contra la colección equivocada sin que se vea.
+        return ToolResult.err(
+            f"'{escrito}' no alcanza para saber de qué {que} se trata: así se llaman en pantalla "
+            f"{len(por_label)} ({', '.join(sorted(por_label))}). Poné el nombre interno."
+        )
+    return ToolResult.err(f"no hay {que} '{escrito}'{donde}. Hay: {_listado(opciones)}")
+
+
+def _catalogo(ctx: ToolContext, bot: dict):
+    """
+    Los plugins instalados en `bot` y sus colecciones, con los dos nombres:
+    `{plugin: (label, {coleccion: label})}`. O un ToolResult de error.
+
+    Sale de `/tools`, que ya trae el catálogo entero; no hay un endpoint de
+    "resolvé este nombre". Es un request de más por acción, y se paga una sola
+    vez y sólo con que=registros: es una acción de pantalla, no un lazo.
+    """
+    try:
+        respuesta, datos = _pedir(ctx, bot["url"], "/tools")
+    except PortError as exc:
+        return ToolResult.err(f"no se pudo leer qué plugins tiene '{bot['nombre']}': {exc}")
+    if not respuesta.ok or not isinstance(datos, dict):
+        return ToolResult.err(
+            f"'{bot['nombre']}' no contestó qué plugins tiene ({respuesta.status}); "
+            "sin eso no se puede saber si 'plugin' y 'coleccion' existen"
+        )
+    catalogo = {}
+    for p in datos.get("plugins") or []:
+        if not isinstance(p, dict) or not p.get("name"):
+            continue
+        catalogo[str(p["name"])] = (
+            str(p.get("label") or ""),
+            {
+                str(r["name"]): str(r.get("label") or "")
+                for r in (p.get("resources") or [])
+                if isinstance(r, dict) and r.get("name")
+            },
+        )
+    return catalogo
+
+
+def _registros(ctx: ToolContext, bot: dict, plugin: str, coleccion: str):
+    """
+    'plugin' y 'coleccion' tal como los nombra el código, o un ToolResult.
+
+    Si el catálogo no se puede leer se sigue con lo que se escribió: `/tools`
+    puede no estar en una app vieja, y traducir un nombre es una comodidad, no
+    la validación —quien valida es el otro lado, que ya contesta "acá no hay
+    una colección X"—. Dejar de migrar porque no se pudo traducir sería cambiar
+    una molestia por una falla. Lo mismo con un catálogo vacío: sin plugins que
+    mirar, "no existe" no es una conclusión, es no haber podido preguntar.
+    """
+    catalogo = _catalogo(ctx, bot)
+    if isinstance(catalogo, ToolResult) or not catalogo:
+        detalle = catalogo.message if isinstance(catalogo, ToolResult) else "no contestó ninguno"
+        ctx.log(f"{detalle}; sigo con '{plugin}' y '{coleccion}' tal como se escribieron", "warning")
+        return plugin.strip(), coleccion.strip()
+    nombre_plugin = _interno(plugin, {n: label for n, (label, _) in catalogo.items()}, "plugin")
+    if isinstance(nombre_plugin, ToolResult):
+        return nombre_plugin
+    nombre_coleccion = _interno(
+        coleccion, catalogo[nombre_plugin][1], "colección", f" en '{nombre_plugin}'")
+    if isinstance(nombre_coleccion, ToolResult):
+        return nombre_coleccion
+    if (plugin.strip(), coleccion.strip()) != (nombre_plugin, nombre_coleccion):
+        # Que se vea en el log: lo que se escribió y lo que terminó usándose.
+        ctx.log(f"'{plugin}' / '{coleccion}' es '{nombre_plugin}' / '{nombre_coleccion}'")
+    return nombre_plugin, nombre_coleccion
 
 
 def _como_objeto(valor) -> dict | None:
@@ -749,8 +857,8 @@ COMPARAR = ToolManifest(
         Param("destino", required=True, options_from="bots", doc="Nombre en Bots conocidos: contra quién comparar."),
         Param("origen", default="", options_from="bots", doc="Vacío: este Bot (ver la configuración 'Dirección de este Bot')."),
         Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros"), doc="'flujos' o 'registros' (los items de una colección)."),
-        Param("plugin", default="", doc="Sólo con que=registros: de qué plugin es la colección, ej. 'convertidor'."),
-        Param("coleccion", default="", doc="Sólo con que=registros: qué colección, ej. 'plantillas'."),
+        Param("plugin", default="", doc="Sólo con que=registros: de qué plugin es la colección, por su título en Plugins ('Connections') o su nombre interno ('connections')."),
+        Param("coleccion", default="", doc="Sólo con que=registros: qué colección, por el título de la pantalla ('Sources') o su nombre interno ('sources')."),
         Param("detalle", ParamType.BOOL, default=False, doc="Agregar a cada item distinto los valores de origen y destino."),
     ),
     outputs=(
@@ -801,6 +909,13 @@ def _comparar(ctx: ToolContext) -> ToolResult:
     else:
         if not plugin or not coleccion:
             return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
+        # Contra el catálogo del ORIGEN: es el lado del que se lee, y el que
+        # tiene que tener la colección sí o sí (al destino puede faltarle, y
+        # eso `_items_de` lo admite a propósito con exigir=False).
+        resuelto = _registros(ctx, origen, plugin, coleccion)
+        if isinstance(resuelto, ToolResult):
+            return resuelto
+        plugin, coleccion = resuelto
         lectura_origen = _items_de(ctx, origen, plugin, coleccion, exigir=True)
         if isinstance(lectura_origen, ToolResult):
             return lectura_origen
@@ -1012,8 +1127,13 @@ def _migrar(ctx: ToolContext) -> ToolResult:
     coleccion = str(ctx.params["coleccion"]).strip()
     incluir_secretos = bool(ctx.params["incluir_secretos"])
 
-    if que == "registros" and not (plugin and coleccion):
-        return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
+    if que == "registros":
+        if not (plugin and coleccion):
+            return ToolResult.err("con que=registros hacen falta 'plugin' y 'coleccion'")
+        resuelto = _registros(ctx, yo, plugin, coleccion)
+        if isinstance(resuelto, ToolResult):
+            return resuelto
+        plugin, coleccion = resuelto
 
     # Sin chequeo previo de secretos a propósito. La app resuelve el caso mejor
     # de lo que podría acá: con `incluir_secretos` en false, un item de

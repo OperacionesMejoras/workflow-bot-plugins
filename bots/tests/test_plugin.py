@@ -36,6 +36,12 @@ API2 = "http://192.168.9.41:8000/api/core"
 API3 = "http://192.168.9.42:8000/api/core"
 
 
+def _cuerpo(http, camino="/migrar"):
+    """El body del request a `camino`. Por índice no sirve: con que=registros
+    `migrar` y `comparar` piden antes `/tools` para traducir los nombres."""
+    return json.loads(next(c for c in http.calls if c["url"].endswith(camino))["body"])
+
+
 def _json(datos, status=200):
     return HttpResponse(status=status, text=json.dumps(datos), headers={"content-type": "application/json"})
 
@@ -603,7 +609,7 @@ def test_migrar_pasa_incluir_secretos_cuando_se_lo_piden():
         "coleccion": "plantillas", "claves": ["api"], "incluir_secretos": True}, http)
 
     assert r.status == "ok" and r.outputs["migrados"] == 1
-    assert json.loads(http.calls[0]["body"])["incluir_secretos"] is True
+    assert _cuerpo(http)["incluir_secretos"] is True
 
 
 def test_migrar_contra_una_app_sin_el_endpoint_dice_que_actualizar():
@@ -697,3 +703,168 @@ def test_migrar_es_peligrosa_y_comparar_cuelga_de_la_coleccion():
     assert acciones["comparar"].resource == "bots"
     destino = next(p for p in acciones["comparar"].params if p.name == "destino")
     assert destino.aliases == ("nombre",)
+
+
+# ── Nombres de pantalla vs nombres internos ──────────────────────────────
+#
+# Desde Plug ins → Acciones, el label es lo ÚNICO que se ve: el nombre interno
+# no figura en ninguna pantalla. Escribir lo que se ve —'Connections',
+# 'Sources'— fallaba con "1 de 1 no se migraron", sin decir cuál campo estaba
+# mal, y el motivo quedaba sólo en el log del run.
+
+CATALOGO = {"plugins": [
+    {"name": "connections", "label": "Connections", "resources": [
+        {"name": "sources", "label": "Sources"},
+        {"name": "actions", "label": "Actions"}]},
+    {"name": "bots", "label": "Bots", "resources": [
+        {"name": "bots", "label": "Bots conocidos"}]},
+    {"name": "convertidor", "label": "Convertidor", "resources": [
+        {"name": "plantillas", "label": "Plantillas"}]},
+]}
+
+
+def _http_migrar(catalogo=CATALOGO, status_tools=200):
+    respuestas = {f"{YO}/migrar": _json(
+        {"migrados": 1, "fallados": 0, "resultados": [{"clave": "Casos TEST", "ok": True}]})}
+    if catalogo is not None:
+        respuestas[f"{YO}/tools"] = _json(catalogo, status=status_tools)
+    return FakeHttp(respuestas)
+
+
+def _migrar_registros(http, plugin, coleccion, claves=("Casos TEST",)):
+    return _accion("migrar", {
+        "destino": "Impresión 2", "que": "registros", "plugin": plugin,
+        "coleccion": coleccion, "claves": list(claves)}, http)
+
+
+def test_migrar_acepta_los_nombres_que_muestra_la_pantalla():
+    http = _http_migrar()
+    r, registro = _migrar_registros(http, "Connections", "Sources")
+
+    assert r.status == "ok"
+    cuerpo = _cuerpo(http)
+    assert (cuerpo["plugin"], cuerpo["coleccion"]) == ("connections", "sources")
+    # Y se ve en el log qué se escribió y qué se terminó usando.
+    assert any("'Connections' / 'Sources' es 'connections' / 'sources'" in m for m in registro)
+
+
+def test_un_label_que_no_es_el_nombre_en_minuscula_tambien_resuelve():
+    # El caso que un .lower() no arregla, y es de este mismo plugin: la
+    # colección se llama `bots` y la pantalla la muestra 'Bots conocidos'.
+    http = _http_migrar()
+    r, _ = _migrar_registros(http, "Bots", "Bots conocidos")
+
+    assert r.status == "ok"
+    cuerpo = _cuerpo(http)
+    assert (cuerpo["plugin"], cuerpo["coleccion"]) == ("bots", "bots")
+
+
+def test_el_nombre_interno_sigue_andando_igual():
+    http = _http_migrar()
+    r, registro = _migrar_registros(http, "connections", "sources")
+
+    assert r.status == "ok"
+    cuerpo = _cuerpo(http)
+    assert (cuerpo["plugin"], cuerpo["coleccion"]) == ("connections", "sources")
+    # Nada que traducir: no ensucia el log.
+    assert not any(" es 'connections'" in m for m in registro)
+
+
+def test_una_coleccion_que_no_existe_lista_las_que_hay():
+    # El error que faltaba: antes decía "1 de 1 no se migraron" y el motivo
+    # quedaba en el log, sin nombrar los valores válidos.
+    r, _ = _migrar_registros(_http_migrar(), "Connections", "Plantillas")
+
+    assert r.status == "err"
+    assert "no hay colección 'Plantillas' en 'connections'" in r.message
+    assert "Hay: actions, sources" in r.message
+
+
+def test_un_plugin_que_no_existe_lista_los_que_hay():
+    r, _ = _migrar_registros(_http_migrar(), "Conections", "Sources")
+
+    assert r.status == "err"
+    assert "no hay plugin 'Conections'" in r.message
+    # Sin paréntesis cuando el label es el mismo nombre con otra caja: repetir
+    # "connections (Connections)" es ruido, y lo que hay que escribir es el
+    # interno, que es justo lo que se muestra.
+    assert "Hay: bots, connections, convertidor" in r.message
+
+
+def test_dos_plugins_con_el_mismo_titulo_no_se_eligen_a_dedo():
+    # Elegir uno sería migrar contra la colección equivocada sin que se note.
+    catalogo = {"plugins": [
+        {"name": "conexiones", "label": "Connections", "resources": [{"name": "s", "label": "S"}]},
+        {"name": "connections_v2", "label": "Connections", "resources": [{"name": "s", "label": "S"}]},
+    ]}
+    r, _ = _migrar_registros(_http_migrar(catalogo), "Connections", "S")
+
+    assert r.status == "err"
+    assert "no alcanza para saber" in r.message
+    assert "conexiones" in r.message and "connections_v2" in r.message
+
+
+def test_el_nombre_interno_le_gana_al_titulo_de_otro():
+    # Si alguien llamó a su plugin igual que el label de otro, lo escrito
+    # literal es lo que quiso: no hay por qué adivinarle.
+    catalogo = {"plugins": [
+        {"name": "sources", "label": "Orígenes", "resources": [{"name": "x", "label": "X"}]},
+        {"name": "connections", "label": "Sources", "resources": [{"name": "y", "label": "Y"}]},
+    ]}
+    http = _http_migrar(catalogo)
+    r, _ = _migrar_registros(http, "sources", "X")
+
+    assert r.status == "ok"
+    assert _cuerpo(http)["plugin"] == "sources"
+
+
+def test_sin_catalogo_sigue_con_lo_escrito_en_vez_de_cortar():
+    # `/tools` puede no estar en una app vieja. Traducir es una comodidad, no
+    # la validación: quien valida es el otro lado. Cortar acá cambiaría una
+    # molestia por una falla.
+    http = _http_migrar(catalogo=None)  # /tools sin guionar -> PortError
+    r, registro = _migrar_registros(http, "convertidor", "plantillas")
+
+    assert r.status == "ok"
+    cuerpo = _cuerpo(http)
+    assert (cuerpo["plugin"], cuerpo["coleccion"]) == ("convertidor", "plantillas")
+    assert any("tal como se escribieron" in m for m in registro)
+
+
+def test_un_catalogo_vacio_no_es_prueba_de_que_no_exista():
+    http = _http_migrar({"plugins": []})
+    r, registro = _migrar_registros(http, "Connections", "Sources")
+
+    assert r.status == "ok"
+    assert any("tal como se escribieron" in m for m in registro)
+
+
+def test_con_que_flujos_no_pide_el_catalogo():
+    # El request de más se paga sólo cuando hay nombres que traducir.
+    http = _http_migrar()
+    _accion("migrar", {"destino": "Impresión 2", "claves": ["F1"]}, http)
+
+    assert not any(c["url"].endswith("/tools") for c in http.calls)
+
+
+def test_el_listado_muestra_el_titulo_cuando_no_es_el_mismo_nombre():
+    # Acá sí hace falta el paréntesis: quien escribió 'Bots conocidos' tiene
+    # que poder ver que el interno es `bots`, que no se deduce del título.
+    r, _ = _migrar_registros(_http_migrar(), "Bots", "Conocidos")
+
+    assert r.status == "err"
+    assert "Hay: bots (Bots conocidos)" in r.message
+
+
+def test_comparar_tambien_acepta_los_nombres_de_pantalla():
+    # Mismos dos campos que `migrar`, misma traducción. Contra el catálogo del
+    # ORIGEN, que es el lado del que se leen los items.
+    http = _http_items(aca=[{"nombre": "cnc3", "patron": "^A"}], alla=[{"nombre": "cnc3", "patron": "^A"}])
+    http.stub(f"{YO}/tools", text=json.dumps(CATALOGO))
+    r, _ = _comparar(http, que="registros", plugin="Convertidor", coleccion="Plantillas")
+
+    assert r.status == "ok"
+    assert r.outputs["diff"]["coleccion"] == "convertidor/plantillas"
+    # Y pidió el catálogo a este Bot, no al destino.
+    tools = [c["url"] for c in http.calls if c["url"].endswith("/tools")]
+    assert tools == [f"{YO}/tools"]
