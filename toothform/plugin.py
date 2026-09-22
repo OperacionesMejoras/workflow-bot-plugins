@@ -206,16 +206,23 @@ EXPORTAR = ToolManifest(
     label="exportar (línea de comandos)",
     category="TOOTHFORM",
     doc=(
-        "Corre Toothform.exe con un JSON de configuración: carga los STL de 'carpeta', "
-        "exporta con QR a 'salida' y termina, sin abrir la ventana (release 20260518 o "
-        "posterior). Espera a que termine y lee el log. El export queda en "
-        "<salida>\\<nombre del dato>. Cualquier parámetro de ParameterSettings del "
-        "Toothform.ini se puede pasar como param extra (ej. LimitX=3.0). El ejecutable "
-        "tiene que estar en process_allowlist, y las rutas ser ASCII."
+        "Corre Toothform.exe con un JSON de configuración: carga los STL de 'carpeta' "
+        "—o sólo los de 'archivos'—, exporta con QR a 'salida' y termina, sin abrir la "
+        "ventana (release 20260518 o posterior). Espera a que termine y lee el log. El "
+        "export queda en <salida>\\<nombre del dato>. Cualquier parámetro de "
+        "ParameterSettings del Toothform.ini se puede pasar como param extra (ej. "
+        "LimitX=3.0). El ejecutable tiene que estar en process_allowlist, y las rutas ser ASCII."
     ),
     params=(
         Param("ejecutable", required=True, doc="Ruta de Toothform.exe, ej. D:\\4in1\\Toothform-20260518\\Toothform.exe."),
-        Param("carpeta", ParamType.PATH, required=True, doc="Carpeta con los STL a exportar (todos los que haya)."),
+        Param("carpeta", ParamType.PATH, default="", doc="Carpeta con los STL a exportar: TODOS los que haya adentro. Alternativa a 'archivos'."),
+        Param(
+            "archivos", ParamType.JSON, default=[],
+            doc="Alternativa a 'carpeta': sólo estos archivos. ToothFORM por línea de comandos "
+            "únicamente sabe cargar una carpeta entera, así que el tool los copia antes a una "
+            "carpeta aparte adentro de 'salida' — con archivos grandes o en un share de red, esa "
+            "copia se paga. Con la carpeta ya armada, conviene 'carpeta'.",
+        ),
         Param("salida", ParamType.PATH, required=True, doc="Carpeta de salida: ahí caen el log, el JSON y <nombre del dato>\\ con el export."),
         Param("tipo", default="Type1", doc="Type1, Type2 o Type3, según cómo viene armado el dato."),
         Param("timeout", ParamType.FLOAT, default=900.0, doc="Segundos máximos para que ToothFORM termine."),
@@ -244,16 +251,39 @@ def _exportar(ctx: ToolContext) -> ToolResult:
             f"parámetros que ToothFORM no conoce: {', '.join(desconocidos)}. "
             f"Válidos: {', '.join(_PARAMETROS_DEFAULT)}"
         )
-    no_ascii = [r for r in (ejecutable, carpeta, salida) if not str(r).isascii()]
+    archivos = ctx.params.get("archivos") or []
+    if bool(carpeta) == bool(archivos):
+        return ToolResult.err(
+            "hace falta 'carpeta' (todos los STL de adentro) o 'archivos' (sólo ésos), no las dos "
+            "ni ninguna" if carpeta else "hace falta 'carpeta' o 'archivos'"
+        )
+    no_ascii = [r for r in (ejecutable, carpeta, salida, *archivos) if r and not str(r).isascii()]
     if no_ascii:
         return ToolResult.err(
             "ToothFORM no encuentra rutas con caracteres fuera de ASCII (acentos, ñ) y termina sin "
             f"exportar ni dejar log; usar una ruta o junction ASCII: {' · '.join(no_ascii)}"
         )
-    if not fs.exists(carpeta) or not fs.is_dir(carpeta):
-        return ToolResult.err(f"no existe la carpeta con los STL: {carpeta}")
 
     fs.make_dirs(salida)
+    if archivos:
+        faltan = [a for a in archivos if not fs.exists(a) or fs.is_dir(a)]
+        if faltan:
+            return ToolResult.err(f"no existen estos archivos: {', '.join(faltan)}")
+        # ToothFORM por cmd sólo sabe cargar una carpeta entera, así que los
+        # elegidos se copian a una propia. Se vacía antes: lo que quedó de una
+        # corrida anterior se exportaría de nuevo sin que nadie lo pidiera, y
+        # ése es el tipo de error que se ve como un export "de más" y no como
+        # una falla.
+        carpeta = fs.join(salida, f"entrada-{ctx.case_id or 'export'}")
+        if fs.exists(carpeta):
+            fs.remove_tree(carpeta)
+        fs.make_dirs(carpeta)
+        for origen in archivos:
+            fs.copy_file(origen, fs.join(carpeta, fs.basename(origen)))
+        ctx.log(f"{len(archivos)} archivo(s) copiados a {carpeta} para exportarlos solos")
+    elif not fs.exists(carpeta) or not fs.is_dir(carpeta):
+        return ToolResult.err(f"no existe la carpeta con los STL: {carpeta}")
+
     previos = {e.name for e in _logs(fs, salida)}
 
     config = {

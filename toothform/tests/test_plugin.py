@@ -242,6 +242,73 @@ def test_exportar_rechaza_un_tipo_que_no_existe_y_una_carpeta_inexistente():
     assert process.calls == []
 
 
+# ── exportar: sólo algunos archivos ─────────────────────────────────────
+#
+# ToothFORM por cmd sólo sabe cargar una carpeta entera (`OpenFolder` del
+# JSON; no hay forma documentada de darle una lista), así que "exportar sólo
+# estos" es copiarlos a una carpeta propia y apuntarlo ahí.
+
+
+def test_exportar_archivos_sueltos_los_copia_a_una_carpeta_y_apunta_ahi():
+    fs = FsConMtimes(files={f"{STL}/uno.stl": "a", f"{STL}/dos.stl": "b", f"{STL}/tres.stl": "c"}, dirs=(SALIDA,))
+    process = ToothformFalso(fs, LOG_OK)
+    resultado = _registry(fs=fs, process=process).execute(
+        "toothform.exportar",
+        _ctx_factory({"ejecutable": EXE, "salida": SALIDA, "archivos": [f"{STL}/uno.stl", f"{STL}/dos.stl"]}),
+    )
+
+    assert resultado.status == "ok"
+    entrada = f"{SALIDA}/entrada-QATF001"
+    assert json.loads(fs.read_text(resultado.outputs["config"]))["FilesToProcess"]["OpenFolder"] == entrada
+    # Sólo los pedidos, con su nombre: el tercero no viaja.
+    assert sorted(p.rsplit("/", 1)[-1] for p in fs.files if p.startswith(entrada)) == ["dos.stl", "uno.stl"]
+
+
+def test_exportar_vacia_la_carpeta_de_entrada_antes_de_copiar():
+    # Lo que quedó de una corrida anterior se exportaría de nuevo sin que nadie
+    # lo pida, y eso se ve como un export "de más", no como una falla.
+    fs = FsConMtimes(
+        files={f"{STL}/uno.stl": "a", f"{SALIDA}/entrada-QATF001/viejo.stl": "x"},
+        dirs=(SALIDA, f"{SALIDA}/entrada-QATF001"),
+    )
+    resultado = _registry(fs=fs, process=ToothformFalso(fs, LOG_OK)).execute(
+        "toothform.exportar",
+        _ctx_factory({"ejecutable": EXE, "salida": SALIDA, "archivos": [f"{STL}/uno.stl"]}),
+    )
+
+    assert resultado.status == "ok"
+    assert f"{SALIDA}/entrada-QATF001/viejo.stl" not in fs.files
+
+
+def test_exportar_con_carpeta_y_archivos_a_la_vez_es_err():
+    fs = FsConMtimes(files={f"{STL}/uno.stl": "a"}, dirs=(STL, SALIDA))
+    resultado = _registry(fs=fs).execute(
+        "toothform.exportar",
+        _ctx_factory({"ejecutable": EXE, "carpeta": STL, "salida": SALIDA, "archivos": [f"{STL}/uno.stl"]}),
+    )
+
+    assert resultado.status == "err" and "no las dos" in resultado.message
+
+
+def test_exportar_sin_carpeta_ni_archivos_es_err():
+    resultado = _registry(fs=FsConMtimes(dirs=(SALIDA,))).execute(
+        "toothform.exportar", _ctx_factory({"ejecutable": EXE, "salida": SALIDA}),
+    )
+
+    assert resultado.status == "err" and "'carpeta' o 'archivos'" in resultado.message
+
+
+def test_exportar_un_archivo_que_no_existe_es_err_antes_de_copiar_nada():
+    fs = FsConMtimes(files={f"{STL}/uno.stl": "a"}, dirs=(SALIDA,))
+    resultado = _registry(fs=fs).execute(
+        "toothform.exportar",
+        _ctx_factory({"ejecutable": EXE, "salida": SALIDA, "archivos": [f"{STL}/uno.stl", f"{STL}/no-esta.stl"]}),
+    )
+
+    assert resultado.status == "err" and "no-esta.stl" in resultado.message
+    assert not any(p.startswith(f"{SALIDA}/entrada-") for p in fs.files)
+
+
 # ── check_log: ok / err / loop ──────────────────────────────────────────
 
 
@@ -328,7 +395,9 @@ def test_add_qr_busca_la_ventana_por_titulo_y_clickea_solo_export():
     assert resultado.status == "ok"
     assert window.calls == [
         {"op": "find_window", "title": "Toothform", "process": None},
-        {"op": "click", "handle": "1", "control": "Export"},
+        # `button` lo agregó el núcleo (core#25) para poder pedir el secundario;
+        # este click no lo pasa, así que queda el primario por default.
+        {"op": "click", "handle": "1", "control": "Export", "button": "left"},
     ]
 
 

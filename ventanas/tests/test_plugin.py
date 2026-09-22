@@ -113,7 +113,7 @@ def test_click_usa_el_handle_de_la_ventana_encontrada():
     )
 
     assert resultado.status == "ok"
-    assert window.calls[-1] == {"op": "click", "handle": "1", "control": "Button:Generate path"}
+    assert window.calls[-1] == {"op": "click", "handle": "1", "control": "Button:Generate path", "button": "left"}
 
 
 def test_marcar_checkbox_es_un_click_sobre_el_checkbox():
@@ -125,7 +125,7 @@ def test_marcar_checkbox_es_un_click_sobre_el_checkbox():
     )
 
     assert resultado.status == "ok"
-    assert window.calls[-1] == {"op": "click", "handle": "1", "control": "CheckBox:Lip Flat"}
+    assert window.calls[-1] == {"op": "click", "handle": "1", "control": "CheckBox:Lip Flat", "button": "left"}
 
 
 def test_una_ventana_que_no_viene_de_encontrar_es_err_con_un_mensaje_claro():
@@ -198,6 +198,6 @@ def test_seleccionar_en_lista_abre_el_dropdown_y_despues_clickea_la_opcion():
 
     assert resultado.status == "ok"
     assert window.calls[-2:] == [
-        {"op": "click", "handle": "1", "control": "ComboBox:Path direction"},
-        {"op": "click", "handle": "1", "control": "CCW"},
+        {"op": "click", "handle": "1", "control": "ComboBox:Path direction", "button": "left"},
+        {"op": "click", "handle": "1", "control": "CCW", "button": "left"},
     ]
