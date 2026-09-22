@@ -26,15 +26,16 @@ ARCHIVOS = {
 }
 
 
-def _buscar(**params):
+def _buscar(log=None, **params):
     reg = ToolRegistry(adapters={"fs": FakeFs(files=ARCHIVOS)})
     reg._add_plugin("archivos", "plugins.archivos:PLUGIN", build_plugin())
+    anotar = (lambda m, level="info": log(m)) if log else (lambda *_a, **_k: None)
 
     def factory(declaracion, ports=None):
         declarados, extras = declaracion.split_params({"carpeta": CASO, **params}, {})
         return ToolContext(
             run_id="run-test", case_id="QATF001", params=declarados, extras=extras,
-            config={}, context={}, log=lambda *_a, **_k: None, ports=ports or {},
+            config={}, context={}, log=anotar, ports=ports or {},
         )
 
     return reg.execute("archivos.buscar", factory)
@@ -87,10 +88,32 @@ def test_etiqueta_y_patron_se_combinan():
     assert r.outputs["cantidad"] == 2
 
 
+def test_devuelve_la_carpeta_que_contiene_lo_encontrado():
+    # `buscar` da archivos, y hay tools que piden una carpeta (el 'exportar' de
+    # ToothFORM). Sin esto no se pueden encadenar: encadenar la carpeta que se
+    # buscó tampoco sirve, porque el walk es recursivo y lo encontrado puede
+    # estar más abajo.
+    r = _buscar(patron=r"^QATF001-[LU]\d{2}-[A-Z]\.stl$")
+    assert r.status == "ok"
+    assert r.outputs["carpeta"] == CASO
+    assert r.outputs["carpetas"] == [CASO]
+
+
+def test_con_resultados_repartidos_avisa_que_carpeta_deja_afuera():
+    # Una sola carpeta no representa al resultado, y elegirla en silencio haría
+    # que un export procesara una parte como si fueran todos.
+    registro = []
+    r = _buscar(etiqueta=".stl", log=registro.append)
+    assert r.status == "ok"
+    assert r.outputs["carpetas"] == [CASO, f"{CASO}/sub"]
+    assert r.outputs["carpeta"] == CASO  # la de 'primera'
+    assert any("repartidos en 2 carpetas" in m for m in registro)
+
+
 def test_sin_coincidencias_es_err_con_salidas_vacias():
     r = _buscar(etiqueta="no-existe")
     assert r.status == "err"
-    assert r.outputs == {"rutas": [], "cantidad": 0, "primera": ""}
+    assert r.outputs == {"rutas": [], "cantidad": 0, "primera": "", "carpeta": "", "carpetas": []}
 
 
 def test_sin_criterio_o_con_regex_rota_es_err_claro():

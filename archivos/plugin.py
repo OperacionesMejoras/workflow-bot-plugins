@@ -167,6 +167,19 @@ BUSCAR = ToolManifest(
         Output("rutas", ParamType.JSON, doc="Lista de rutas encontradas."),
         Output("cantidad", ParamType.INT),
         Output("primera", ParamType.PATH, doc="La primera ruta encontrada, para usarla directo como {primera}."),
+        Output(
+            "carpeta", ParamType.PATH,
+            doc="La carpeta que contiene la PRIMERA ruta encontrada, para los tools que piden una "
+            "carpeta y no archivos sueltos (ej. 'exportar' de ToothFORM). Ojo: la búsqueda es "
+            "recursiva, así que si los resultados están repartidos ésta es la de uno solo — "
+            "mirá 'carpetas' para saber si hay más de una.",
+        ),
+        Output(
+            "carpetas", ParamType.JSON,
+            doc="Las carpetas distintas donde cayeron los resultados, ordenadas. Con una sola entrada, "
+            "'carpeta' las representa a todas; con más de una, el resultado está repartido y elegir "
+            "una sola deja las otras afuera.",
+        ),
     ),
 )
 
@@ -195,8 +208,26 @@ def _buscar(ctx: ToolContext) -> ToolResult:
     criterio = " y ".join(c for c in (f"'{ctx.params.get('etiqueta')}'" if etiqueta else "", f"/{patron}/" if patron else "") if c)
     ctx.log(f"{len(rutas)} archivo(s) con {criterio} en {carpeta}")
     if not rutas:
-        return ToolResult.err(f"ningún archivo con {criterio} en {carpeta}", rutas=[], cantidad=0, primera="")
-    return ToolResult.ok(rutas=rutas, cantidad=len(rutas), primera=rutas[0])
+        return ToolResult.err(
+            f"ningún archivo con {criterio} en {carpeta}",
+            rutas=[], cantidad=0, primera="", carpeta="", carpetas=[],
+        )
+
+    # La carpeta de cada resultado, no la que se buscó: `walk` es recursivo, así
+    # que los archivos pueden estar en una subcarpeta —o en varias—. Un tool que
+    # pide una carpeta (el 'exportar' de ToothFORM) necesita la que los
+    # contiene, y encadenar la que se buscó le daría la de más arriba.
+    carpetas = sorted({fs.parent(r) for r in rutas})
+    if len(carpetas) > 1:
+        ctx.log(
+            f"están repartidos en {len(carpetas)} carpetas; 'carpeta' es la de la primera "
+            f"({fs.parent(rutas[0])}) y deja las otras afuera",
+            "warning",
+        )
+    return ToolResult.ok(
+        rutas=rutas, cantidad=len(rutas), primera=rutas[0],
+        carpeta=fs.parent(rutas[0]), carpetas=carpetas,
+    )
 
 
 # ── comparar_conteo ───────────────────────────────────────────────────────
