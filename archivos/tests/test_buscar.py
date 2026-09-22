@@ -119,3 +119,104 @@ def test_sin_coincidencias_es_err_con_salidas_vacias():
 def test_sin_criterio_o_con_regex_rota_es_err_claro():
     assert "etiqueta" in _buscar().message
     assert "expresión regular" in _buscar(patron="[").message
+
+
+# ── subcarpeta: bajar al caso antes de buscar ────────────────────────────
+#
+# Contra la carpeta de casos terminados (~50k casos, 6,3M archivos) recorrer el
+# árbol entero para llegar a uno tarda ~18 minutos, y el nodo no escribe una
+# sola línea hasta terminar el walk: el síntoma es "no encuentra nada y no deja
+# log", que se lee como que cortó temprano cuando en realidad seguía caminando.
+
+import dataclasses  # noqa: E402
+
+
+class FsConFechas(FakeFs):
+    """`FakeFs` con mtime por ruta: el del núcleo no lo modela, y el desempate
+    por fecha entre dos carpetas del mismo caso es justo lo que hay que probar."""
+
+    def __init__(self, *a, fechas=None, **kw):
+        super().__init__(*a, **kw)
+        self.fechas = dict(fechas or {})
+
+    def stat(self, path):
+        info = super().stat(path)
+        if info.path in self.fechas:
+            return dataclasses.replace(info, modified_at=self.fechas[info.path])
+        return info
+
+
+RAIZ = "//server/CASOS TERMINADOS"
+# El caso real: el mismo id dos veces, la segunda por un apellido mal tipeado.
+VIEJA, NUEVA = f"{RAIZ}/BX718 Guaglianone, Ana 1.1", f"{RAIZ}/BX718 Guaglione Ana 1.1"
+CASOS = {
+    f"{VIEJA}/BX718-L00-A.stl": "", f"{VIEJA}/BX718-L00-A-gum.stl": "",
+    f"{NUEVA}/BX718-L00-A.stl": "", f"{NUEVA}/BX718-U01-B.stl": "",
+    f"{RAIZ}/BX999 Otro 1.0/BX999-L00-A.stl": "",
+    # Un caso más abajo, con el mismo id: no cuelga del root, no es candidato.
+    f"{RAIZ}/archivo/BX718 vieja/BX718-L00-A.stl": "",
+}
+FECHAS = {VIEJA: 1789410586.0, NUEVA: 1789575049.0}  # la nueva es 2 días posterior
+ENTREGABLE = r"^[A-Z]{2}\d{3}-[LU]\d{2}-[A-Z]\.stl$"
+
+
+def _en_casos(log=None, **params):
+    reg = ToolRegistry(adapters={"fs": FsConFechas(files=CASOS, fechas=FECHAS)})
+    reg._add_plugin("archivos", "plugins.archivos:PLUGIN", build_plugin())
+    anotar = (lambda m, level="info": log((level, m))) if log else (lambda *_a, **_k: None)
+
+    def factory(declaracion, ports=None):
+        declarados, extras = declaracion.split_params({"carpeta": RAIZ, **params}, {})
+        return ToolContext(
+            run_id="run-test", case_id="BX718", params=declarados, extras=extras,
+            config={}, context={}, log=anotar, ports=ports or {},
+        )
+
+    return reg.execute("archivos.buscar", factory)
+
+
+def test_con_subcarpeta_busca_solo_adentro_del_caso():
+    r = _en_casos(subcarpeta="BX718", patron=ENTREGABLE)
+    assert r.status == "ok"
+    # Sólo los de la carpeta elegida: ni los del otro caso ni los de la vieja.
+    assert all(p.startswith(NUEVA) for p in r.outputs["rutas"]), r.outputs["rutas"]
+    assert r.outputs["carpeta"] == NUEVA
+
+
+def test_con_dos_carpetas_del_mismo_caso_gana_la_mas_nueva_y_lo_dice():
+    registro = []
+    r = _en_casos(subcarpeta="BX718", patron=ENTREGABLE, log=registro.append)
+    assert r.outputs["carpeta"] == NUEVA
+    # Warning y no error: hay una respuesta razonable, pero elegirla en silencio
+    # sería decidir por el operador.
+    assert any(
+        nivel == "warning" and "2 subcarpetas" in m and "Guaglione Ana 1.1" in m
+        and "deja afuera" in m and "Guaglianone" in m
+        for nivel, m in registro
+    ), registro
+
+
+def test_solo_mira_las_subcarpetas_directas():
+    # `archivo/BX718 vieja` tiene el id en el nombre pero cuelga un nivel más
+    # abajo. La suposición es "el caso cuelga del root", no "está en algún lado".
+    r = _en_casos(subcarpeta="BX718", patron=ENTREGABLE)
+    assert not any("/archivo/" in p for p in r.outputs["rutas"])
+
+
+def test_sin_subcarpeta_sigue_recorriendo_todo_como_antes():
+    # Lo aditivo: los flujos que ya andan no cambian de conducta.
+    r = _en_casos(patron=ENTREGABLE)
+    assert r.status == "ok"
+    assert len(r.outputs["carpetas"]) == 4  # las dos del caso, el otro, y el de archivo/
+
+
+def test_un_caso_que_no_esta_se_distingue_de_un_caso_vacio():
+    # Dos errores distintos donde antes había uno: el flujo puede ramificar.
+    r = _en_casos(subcarpeta="BX000", patron=ENTREGABLE)
+    assert r.status == "err"
+    assert "ninguna subcarpeta" in r.message and "BX000" in r.message
+    assert r.outputs == {"rutas": [], "cantidad": 0, "primera": "", "carpeta": "", "carpetas": []}
+
+    r = _en_casos(subcarpeta="BX999", patron=r"^no-existe$")
+    assert r.status == "err"
+    assert "ningún archivo" in r.message and "BX999 Otro 1.0" in r.message

@@ -188,10 +188,19 @@ BUSCAR = ToolManifest(
     doc=(
         "Busca, recursivo, los archivos de una carpeta. Por 'etiqueta' (substring "
         "del nombre) o por 'patron' (expresión regular sobre el nombre, re.search); "
-        "al menos uno de los dos."
+        "al menos uno de los dos. Con 'subcarpeta' baja primero a la subcarpeta que "
+        "corresponda y busca sólo ahí adentro, en vez de recorrer todo el árbol."
     ),
     params=(
         Param("carpeta", ParamType.PATH, required=True),
+        Param(
+            "subcarpeta",
+            doc="Ej.: {id_externo}. Baja primero a la subcarpeta DIRECTA de 'carpeta' cuyo nombre contenga esto "
+            "—sin distinguir mayúsculas— y busca sólo ahí adentro. Con más de una, gana la "
+            "modificada más recientemente, y el log dice cuál y cuáles dejó afuera. Sin esto se "
+            "recorre el árbol entero de 'carpeta': contra una carpeta de casos terminados eso es "
+            "visitar cada archivo de cada caso para llegar a uno.",
+        ),
         Param("etiqueta", doc=_DOC_ETIQUETA),
         Param("patron", doc=_DOC_PATRON),
     ),
@@ -216,6 +225,49 @@ BUSCAR = ToolManifest(
 )
 
 
+_SIN_NADA = {"rutas": [], "cantidad": 0, "primera": "", "carpeta": "", "carpetas": []}
+
+
+def _bajar_a(ctx: ToolContext, fs, carpeta: str, etiqueta: str):
+    """
+    La subcarpeta DIRECTA de `carpeta` que contiene `etiqueta` en el nombre; con
+    más de una, la modificada más recientemente. O un ToolResult de error.
+
+    Directa y no recursiva a propósito: la suposición real es "la carpeta del
+    caso cuelga de acá", que es fácil de verificar, y no "los candidatos salen
+    seguidos si ordeno", que depende del nivel en que estén y de que la etiqueta
+    sea prefijo.
+
+    Se paga `list_dir`, que statea cada entrada: contra una carpeta de casos
+    terminados con ~50k casos son ~80s, de los cuales ~78 son stats que no se
+    usan —hacen falta los nombres, y el mtime de las dos o tres que matchean—.
+    Es el precio de que el port no ofrezca un listado sin stat; aun así es un
+    orden de magnitud menos que recorrer el árbol entero, que son ~18 minutos y
+    seis millones de archivos visitados. Pedido en workflow-bot-core#33.
+    """
+    baja = etiqueta.lower()
+    candidatas = [e for e in fs.list_dir(carpeta) if e.is_dir and baja in e.name.lower()]
+    if not candidatas:
+        return ToolResult.err(
+            f"ninguna subcarpeta de {carpeta} tiene '{etiqueta}' en el nombre", **_SIN_NADA)
+
+    # Por fecha, y el nombre desempata para que dos con la misma fecha no
+    # dependan del orden en que las devolvió el filesystem.
+    candidatas.sort(key=lambda e: (-e.modified_at, e.name))
+    elegida = candidatas[0]
+    if len(candidatas) > 1:
+        # Warning y no error: con un id repetido —un caso rehecho, un apellido
+        # mal tipeado— hay una respuesta razonable, pero que se elija sola sin
+        # que quede escrito sería decidir por el operador en silencio.
+        otras = ", ".join(e.name for e in candidatas[1:])
+        ctx.log(
+            f"{len(candidatas)} subcarpetas con '{etiqueta}': va '{elegida.name}' "
+            f"por ser la más nueva; deja afuera {otras}",
+            "warning",
+        )
+    return elegida.path
+
+
 def _buscar(ctx: ToolContext) -> ToolResult:
     fs = ctx.port(port_names.FS)
     carpeta = ctx.params["carpeta"]
@@ -224,6 +276,13 @@ def _buscar(ctx: ToolContext) -> ToolResult:
 
     if not ctx.params.get("etiqueta") and not ctx.params.get("patron"):
         return ToolResult.err("hace falta 'etiqueta' o 'patron'")
+
+    if subcarpeta := (ctx.params.get("subcarpeta") or "").strip():
+        elegida = _bajar_a(ctx, fs, carpeta, subcarpeta)
+        if isinstance(elegida, ToolResult):
+            return elegida
+        carpeta = elegida
+
     try:
         coincide, criterio = _filtro(ctx.params.get("etiqueta"), ctx.params.get("patron"))
     except re.error as exc:
@@ -232,10 +291,7 @@ def _buscar(ctx: ToolContext) -> ToolResult:
     rutas = [e.path for e in fs.walk(carpeta) if not e.is_dir and coincide(e.name)]
     ctx.log(f"{len(rutas)} archivo(s) con {criterio} en {carpeta}")
     if not rutas:
-        return ToolResult.err(
-            f"ningún archivo con {criterio} en {carpeta}",
-            rutas=[], cantidad=0, primera="", carpeta="", carpetas=[],
-        )
+        return ToolResult.err(f"ningún archivo con {criterio} en {carpeta}", **_SIN_NADA)
 
     # La carpeta de cada resultado, no la que se buscó: `walk` es recursivo, así
     # que los archivos pueden estar en una subcarpeta —o en varias—. Un tool que

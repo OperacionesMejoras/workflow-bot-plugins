@@ -1,6 +1,6 @@
 {
   "name": "archivos",
-  "description": "Mover, copiar, eliminar, renombrar, buscar (por etiqueta o regex) y comparar el conteo de dos carpetas, contra el port fs.",
+  "description": "Mover, copiar, eliminar, renombrar, buscar (bajando primero a la subcarpeta del caso, por etiqueta o regex) y comparar el conteo de dos carpetas, contra el port fs.",
   "source": "workflow-bot-plugin-archivos",
   "path": "archivos",
   "ports": [
