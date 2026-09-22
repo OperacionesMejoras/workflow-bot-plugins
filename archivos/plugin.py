@@ -145,6 +145,42 @@ def _renombrar(ctx: ToolContext) -> ToolResult:
 
 # ── buscar ──────────────────────────────────────────────────────────────
 
+# `buscar` y `comparar_conteo` filtran con el mismo criterio, así que el texto
+# que lo explica y el código que lo aplica viven una sola vez: dos copias se
+# separan en cuanto una de las dos cambie, y lo que un flujo escribe en
+# 'patron' tiene que contar igual en las dos.
+_DOC_ETIQUETA = "Substring del nombre, sin distinguir mayúsculas."
+_DOC_PATRON = (
+    "Expresión regular sobre el nombre del archivo (re.search, sin distinguir mayúsculas). "
+    r"Ej. ^[A-Z]{2}\d{3}-[LU]\d{2}-[A-Z]\.stl$"
+)
+
+
+def _filtro(etiqueta: str, patron: str):
+    """
+    El par `(coincide, criterio)` que salen de una etiqueta y un patrón: el
+    primero dice si un nombre entra, el segundo lo describe para el log. Con
+    los dos hay que cumplir los dos; sin ninguno entra todo.
+
+    Levanta `re.error` si el patrón no compila — cada tool decide qué mensaje
+    dar, porque el parámetro no se llama igual en todas.
+    """
+    etiqueta = etiqueta or ""
+    patron = patron or ""
+    regex = re.compile(patron, re.IGNORECASE) if patron else None
+
+    def coincide(nombre: str) -> bool:
+        if etiqueta and etiqueta.lower() not in nombre.lower():
+            return False
+        return regex is None or regex.search(nombre) is not None
+
+    criterio = " y ".join(c for c in (
+        f"'{etiqueta}'" if etiqueta else "",
+        f"/{patron}/" if patron else "",
+    ) if c)
+    return coincide, criterio or "todos los archivos"
+
+
 BUSCAR = ToolManifest(
     id="archivos.buscar",
     label="buscar",
@@ -156,12 +192,8 @@ BUSCAR = ToolManifest(
     ),
     params=(
         Param("carpeta", ParamType.PATH, required=True),
-        Param("etiqueta", doc="Substring del nombre, sin distinguir mayúsculas."),
-        Param(
-            "patron",
-            doc="Expresión regular sobre el nombre del archivo (re.search, sin distinguir mayúsculas). "
-            r"Ej. ^[A-Z]{2}\d{3}-[LU]\d{2}-[A-Z]\.stl$",
-        ),
+        Param("etiqueta", doc=_DOC_ETIQUETA),
+        Param("patron", doc=_DOC_PATRON),
     ),
     outputs=(
         Output("rutas", ParamType.JSON, doc="Lista de rutas encontradas."),
@@ -190,22 +222,14 @@ def _buscar(ctx: ToolContext) -> ToolResult:
     if not fs.exists(carpeta) or not fs.is_dir(carpeta):
         return ToolResult.err(f"no existe la carpeta: {carpeta}")
 
-    etiqueta = (ctx.params.get("etiqueta") or "").lower()
-    patron = ctx.params.get("patron") or ""
-    if not etiqueta and not patron:
+    if not ctx.params.get("etiqueta") and not ctx.params.get("patron"):
         return ToolResult.err("hace falta 'etiqueta' o 'patron'")
     try:
-        regex = re.compile(patron, re.IGNORECASE) if patron else None
+        coincide, criterio = _filtro(ctx.params.get("etiqueta"), ctx.params.get("patron"))
     except re.error as exc:
         return ToolResult.err(f"'patron' no es una expresión regular válida: {exc}")
 
-    def coincide(nombre: str) -> bool:
-        if etiqueta and etiqueta not in nombre.lower():
-            return False
-        return regex is None or regex.search(nombre) is not None
-
     rutas = [e.path for e in fs.walk(carpeta) if not e.is_dir and coincide(e.name)]
-    criterio = " y ".join(c for c in (f"'{ctx.params.get('etiqueta')}'" if etiqueta else "", f"/{patron}/" if patron else "") if c)
     ctx.log(f"{len(rutas)} archivo(s) con {criterio} en {carpeta}")
     if not rutas:
         return ToolResult.err(
@@ -232,39 +256,75 @@ def _buscar(ctx: ToolContext) -> ToolResult:
 
 # ── comparar_conteo ───────────────────────────────────────────────────────
 
+def _doc_patron(lado: str) -> str:
+    # `_DOC_PATRON` trae el ejemplo con llaves ({2}, {3}), así que se concatena:
+    # un .format() sobre ese texto las leería como campos y reventaría.
+    return (
+        _DOC_PATRON + f" Filtra sólo 'carpeta_{lado}'; vacío la cuenta entera. El patrón va "
+        "por lado porque las dos carpetas pueden guardar el mismo entregable rodeado de "
+        "cosas distintas —la salida del 4in1 trae además los intermedios (-att, -gum, "
+        "-tooth, -MatA) que la carpeta exportada no tiene—, así que el filtro se pone donde "
+        "hace falta y no hay que acomodar las carpetas para que la filtrable caiga en un "
+        "lado fijo. Ojo: filtrando uno solo, cualquier archivo suelto del otro mueve el "
+        "conteo; el mismo patrón de los dos lados es el control más firme."
+    )
+
+
 COMPARAR_CONTEO = ToolManifest(
     id="archivos.comparar_conteo",
     label="comparar conteo",
     category="ARCHIVOS",
     doc=(
-        "Cuenta los archivos de dos carpetas (opcionalmente filtrando por "
-        "etiqueta en el nombre) y compara: 'ok' si coinciden, 'err' si no."
+        "Cuenta, recursivo, los archivos de dos carpetas y compara: 'ok' si coinciden, "
+        "'err' si no. Cada carpeta lleva su propio 'patron'; la que lo deja vacío se "
+        "cuenta entera. Sin ningún filtro es carpeta contra carpeta."
     ),
     params=(
         Param("carpeta_a", ParamType.PATH, required=True),
+        Param("patron_a", doc=_doc_patron("a")),
         Param("carpeta_b", ParamType.PATH, required=True),
-        Param("etiqueta", doc="Si se da, sólo cuenta archivos cuyo nombre la contenga."),
+        Param("patron_b", doc=_doc_patron("b")),
+        Param(
+            "etiqueta",
+            doc=_DOC_ETIQUETA + " Va sobre las dos carpetas, no por lado: identifica el "
+            "caso, que es el mismo de los dos lados. Lo que cambia de un lado al otro es "
+            "la forma del archivo, y de eso se ocupan 'patron_a' y 'patron_b'.",
+        ),
     ),
     outputs=(Output("cantidad_a", ParamType.INT), Output("cantidad_b", ParamType.INT)),
 )
 
 
-def _contar(fs, carpeta: str, etiqueta: str) -> int:
-    if not fs.exists(carpeta) or not fs.is_dir(carpeta):
-        return 0
-    entradas = (e for e in fs.walk(carpeta) if not e.is_dir)
-    if etiqueta:
-        entradas = (e for e in entradas if etiqueta.lower() in e.name.lower())
-    return sum(1 for _ in entradas)
-
-
 def _comparar_conteo(ctx: ToolContext) -> ToolResult:
     fs = ctx.port(port_names.FS)
-    etiqueta = ctx.params.get("etiqueta") or ""
     carpeta_a, carpeta_b = ctx.params["carpeta_a"], ctx.params["carpeta_b"]
-    cantidad_a = _contar(fs, carpeta_a, etiqueta)
-    cantidad_b = _contar(fs, carpeta_b, etiqueta)
-    ctx.log(f"{carpeta_a}: {cantidad_a} · {carpeta_b}: {cantidad_b}")
+    # Una carpeta que no está contaba 0, así que dos rutas mal escritas daban
+    # 0 vs 0 → 'ok': el control más tranquilizador era el que no miraba nada. Con
+    # un patrón es peor, porque ahí el 0 también es el resultado legítimo de uno
+    # que no matchea y deja de distinguirse de la ruta equivocada. Que falle.
+    for carpeta in (carpeta_a, carpeta_b):
+        if not fs.exists(carpeta) or not fs.is_dir(carpeta):
+            return ToolResult.err(f"no existe la carpeta: {carpeta}")
+
+    etiqueta = ctx.params.get("etiqueta")
+    filtros = {}
+    for lado in ("a", "b"):
+        try:
+            filtros[lado] = _filtro(etiqueta, ctx.params.get(f"patron_{lado}"))
+        except re.error as exc:
+            return ToolResult.err(f"'patron_{lado}' no es una expresión regular válida: {exc}")
+    (coincide_a, criterio_a), (coincide_b, criterio_b) = filtros["a"], filtros["b"]
+
+    def contar(carpeta: str, coincide) -> int:
+        return sum(1 for e in fs.walk(carpeta) if not e.is_dir and coincide(e.name))
+
+    cantidad_a, cantidad_b = contar(carpeta_a, coincide_a), contar(carpeta_b, coincide_b)
+    # Los dos criterios en el log, no sólo los números: con un lado filtrado y el
+    # otro no, un 3 vs 3 sale de dos preguntas distintas y conviene que se vea.
+    ctx.log(
+        f"{carpeta_a} ({criterio_a}): {cantidad_a} · "
+        f"{carpeta_b} ({criterio_b}): {cantidad_b}"
+    )
     if cantidad_a != cantidad_b:
         return ToolResult.err(
             f"no coinciden: {cantidad_a} vs {cantidad_b}", cantidad_a=cantidad_a, cantidad_b=cantidad_b,
