@@ -143,29 +143,72 @@ COMPARAR_ACCION = Action(
         # `destino` con alias `nombre`: el item de la colección entrega sus
         # campos por su nombre real (`key_field` es "nombre"), y el alias deja
         # que el param se siga llamando igual que en el tool.
-        Param("destino", required=True, aliases=("nombre",), options_from="bots"),
-        Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros")),
-        Param("plugin", default="", doc="Sólo con que=registros, ej. 'convertidor'."),
-        Param("coleccion", default="", doc="Sólo con que=registros, ej. 'plantillas'."),
+        Param(
+            "destino", required=True, aliases=("nombre",), options_from="bots",
+            doc="Contra qué Bot comparar. Viene puesto del renglón desde donde se apretó.",
+        ),
+        Param(
+            "que", ParamType.ENUM, default="flujos", choices=("flujos", "registros"),
+            doc="'flujos' = los diagramas. 'registros' = los items de una colección de un plugin. "
+            "Las variables de entorno no se pueden comparar (un secreto no sale por la API): "
+            "para ésas está la acción 'Migrar'.",
+        ),
+        Param(
+            "plugin", default="",
+            doc="Sólo con que=registros: de qué plugin es la colección, como figura en Plugins. "
+            "Ej.: convertidor",
+        ),
+        Param(
+            "coleccion", default="",
+            doc="Sólo con que=registros: qué colección de ese plugin. Es el nombre interno, no el "
+            "título de la pantalla. Ej.: plantillas",
+        ),
     ),
 )
 
 MIGRAR_ACCION = Action(
-    "migrar", "Migrar lo elegido",
-    doc="Le manda al otro Bot las claves elegidas, cifradas con la clave del emparejamiento. "
-        "Escribe en la otra punta y pisa lo que haya con ese nombre. Los campos secretos "
-        "quedan afuera salvo que se marque 'incluir secretos'.",
+    # "Migrar lo elegido" nombraba la selección de la tabla, que acá no existe:
+    # suelto en la pantalla del plugin se leía como si hiciera lo mismo que el
+    # botón del renglón. El nombre tiene que decir para qué sirve ESTE camino.
+    "migrar", "Migrar a mano (secretos y variables de entorno)",
+    doc="El camino directo, sin comparar antes: se escriben las claves a mano. Es el único con la "
+        "casilla 'incluir secretos' y el único que puede mover variables de entorno. Para todo lo "
+        "demás conviene 'Comparar contenido', en el renglón de cada Bot: ahí se ve qué cambia antes "
+        "de tocar nada. Escribe en el otro Bot y pisa lo que haya con ese nombre; no borra nada.",
     dangerous=True,
     params=(
-        Param("destino", required=True, options_from="bots", doc="Nombre en Bots conocidos."),
-        Param("que", ParamType.ENUM, default="flujos", choices=("flujos", "registros", "env")),
-        Param("plugin", default="", doc="Sólo con que=registros."),
-        Param("coleccion", default="", doc="Sólo con que=registros."),
-        Param("claves", ParamType.JSON, required=True, doc="Qué migrar: nombres de flujos, o claves de items."),
+        Param(
+            "destino", required=True, options_from="bots",
+            doc="El Bot que va a RECIBIR, por su nombre en 'Bots conocidos' (no su dirección). "
+            "Ej.: Impresión 2",
+        ),
+        Param(
+            "que", ParamType.ENUM, default="flujos", choices=("flujos", "registros", "env"),
+            doc="'flujos' = los diagramas. 'registros' = los items de una colección de un plugin "
+            "(hay que llenar 'plugin' y 'coleccion'). 'env' = variables de entorno.",
+        ),
+        Param(
+            "plugin", default="",
+            doc="Sólo con que=registros: de qué plugin es la colección, como figura en Plugins. "
+            "Ej.: convertidor",
+        ),
+        Param(
+            "coleccion", default="",
+            doc="Sólo con que=registros: qué colección de ese plugin. Es el nombre interno, no el "
+            "título de la pantalla. Ej.: plantillas",
+        ),
+        Param(
+            "claves", ParamType.JSON, default=[], required=True,
+            doc='Una LISTA de qué migrar, entre corchetes. Flujos: su nombre tal cual. Registros: el '
+            'campo que los identifica (el que la colección muestra como clave). env: el nombre de la '
+            'variable. Ej.: ["TOOTHFORM CNC4 V3", "TOOTHCAM watch"]',
+        ),
         Param(
             "incluir_secretos", ParamType.BOOL, default=False,
-            doc="Los campos secretos se pisan a ciegas: no se puede saber si el del otro lado difiere, "
-            "porque no sale por la API. Sin esto, una colección con campos secretos no se migra.",
+            doc="Sin marcar, lo demás del item viaja igual y el otro Bot conserva su secreto. "
+            "Marcado, se lo pisa a ciegas: no hay forma de saber si el de allá era distinto, porque "
+            "un secreto no sale por la API de nadie. Para 'env' hace falta marcarlo: una variable es "
+            "su valor, no hay otra parte que mandar.",
         ),
     ),
 )
