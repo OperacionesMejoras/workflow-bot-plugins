@@ -727,9 +727,7 @@ class FsLogDemorado(FakeFs):
 def _toothcam_enviar(fs, clock=None, **params):
     clock = clock or FakeClock()
     reg = _registry(fs=fs, clock=clock)
-    # Sin 'finish': estos tests son del log tipo ToothFORM, que no lo trae. Los
-    # de ToothCAM con 'finish' (el default del tool) lo piden explícito.
-    defaults = {"carpeta_watch": WATCH, "carpeta_salida": RESULT, "archivo_fin": ""}
+    defaults = {"carpeta_watch": WATCH, "carpeta_salida": RESULT}
     resultado = reg.execute("toothform.toothcam_enviar", _ctx_factory({**defaults, **params}))
     return resultado, fs, clock
 
@@ -939,30 +937,42 @@ def test_toothcam_enviar_con_copiar_deja_los_originales_donde_estaban():
 
 class FsToothCAM(FakeFs):
     """
-    ToothCAM trabajando: cada 'cada' segundos le suma una línea al log y, una
-    vuelta después de la última, deja 'finish' en la carpeta de salida.
+    ToothCAM trabajando, como se vio con BY275: apenas termina de escanear deja
+    "finish.log" ("finish in this folder"); después, cada 'cada' segundos le
+    suma una línea al log del caso y, 'retraso' vueltas más tarde, el .txt de
+    salida de ese modelo (salvo que haya fallado).
     """
 
-    def __init__(self, clock, salida: str, lineas: list[str], cada: float, fin: str | None = "finish", **kw) -> None:
+    def __init__(self, clock, salida: str, lineas: list[str], cada: float, retraso: int = 0, **kw) -> None:
         super().__init__(**kw)
-        self.clock, self.salida, self.lineas, self.cada, self.fin = clock, salida, lineas, cada, fin
+        self.clock, self.salida, self.lineas, self.cada, self.retraso = clock, salida, lineas, cada, retraso
         self.log = f"{salida}/BY275.log"
 
     def _vuelta(self) -> int:
         return int(self.clock.monotonic() // self.cada)
 
     def _sincronizar(self) -> None:
-        n = min(len(self.lineas), self._vuelta())
-        if n and self.lineas:
-            self.dirs.add(self.salida)
+        vuelta = self._vuelta()
+        if vuelta < 1:
+            return
+        self.dirs.add(self.salida)
+        self.files[f"{self.salida}/finish.log"] = "finish in this folder\n"
+        n = min(len(self.lineas), vuelta)
+        if n:
             self.files[self.log] = "\n".join(self.lineas[:n]) + "\n"
-        if self.fin and self._vuelta() > len(self.lineas):
-            self.dirs.add(self.salida)
-            self.files[f"{self.salida}/{self.fin}"] = ""
+        for linea in self.lineas[: max(0, min(len(self.lineas), vuelta - self.retraso))]:
+            _n, dato, _fecha, estado = linea.strip().split("\t")
+            if estado == "success":
+                self.dirs.add(f"{self.salida}/{dato}")
+                self.files[f"{self.salida}/{dato}/{dato}.TXT"] = "x"
 
     def exists(self, path):
         self._sincronizar()
         return super().exists(path)
+
+    def walk(self, path, max_depth=None):
+        self._sincronizar()
+        return super().walk(path, max_depth)
 
     def list_dir(self, path):
         self._sincronizar()
@@ -972,7 +982,8 @@ class FsToothCAM(FakeFs):
 
 # El log de BY275 tal cual lo dejó ToothCAM (23/09/2026), con tabs y el tab del
 # final: el número de la derecha son los archivos vistos hasta ahí, y el nodo
-# anterior cortó en "10\10" creyendo que había terminado.
+# cortó en "10\10" creyendo que había terminado. Las dos últimas líneas son
+# inventadas, para que haya algo después de ese 10\10.
 LOG_BY275 = [
     "1\\1\tBY275-L06-A\t2026-09-23-15-43-41\tsuccess\t",
     "2\\3\tBY275-L00-B\t2026-09-23-15-43-42\tsuccess\t",
@@ -988,13 +999,15 @@ LOG_BY275 = [
     "12\\12\tBY275-U01-A\t2026-09-23-15-43-51\tsuccess\t",
 ]
 SALIDA_CASO = "D:/toothcam_out/BY275"
+# El patrón de producción de los STL de entrada, con .txt en vez de -gum.stl.
+PATRON_TXT = r"^(?P<id_externo>[A-Z]{2}\d{3})-(?P<maxilar>[LU])(?P<movimiento>\d{2})-(?P<type>[A-Z])\.txt$"
 
 
 def _toothcam_con(fs, clock, **params):
     return _toothcam_enviar(
         fs, clock, **{
             "carpeta_salida": SALIDA_CASO, "archivos": ["D:/casos/uno-gum.stl"],
-            "intervalo": 5.0, "timeout": 600.0, "archivo_fin": "finish", **params,
+            "intervalo": 5.0, "timeout": 600.0, **params,
         },
     )
 
@@ -1006,82 +1019,94 @@ def _toothcam_fs(clock, lineas, **kw):
     )
 
 
-def test_toothcam_enviar_no_corta_en_10_de_10_espera_el_finish():
+def _con_falla(dato: str) -> list[str]:
+    return [l.replace("success", "fail") if dato in l else l for l in LOG_BY275]
+
+
+def test_toothcam_enviar_con_esperados_no_corta_en_10_de_10_ni_con_el_finish_log():
     clock = FakeClock()
 
-    resultado, _, clock = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock)
+    resultado, _, clock = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock, esperados=12)
 
     assert resultado.status == "ok"
+    assert resultado.outputs["log_file"] == "BY275.log"  # no el finish.log
     assert resultado.outputs["exitosos"] == 12 and resultado.outputs["fallidos"] == 0
-    assert clock.monotonic() > 10.0 * len(LOG_BY275)  # hasta que apareció finish, no antes
+    assert clock.monotonic() >= 10.0 * len(LOG_BY275)  # hasta la línea 12, no antes
 
 
 def test_toothcam_enviar_con_un_dato_que_falla_es_err_y_lo_nombra():
     clock = FakeClock()
-    lineas = LOG_BY275[:5] + ["6\\10\tBY275-L09-A\t2026-09-23-15-43-42\tfail\t"] + LOG_BY275[6:]
 
-    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, lineas), clock)
+    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, _con_falla("BY275-L09-A")), clock, esperados=12)
 
     assert resultado.status == "err"
     assert "BY275-L09-A" in resultado.message
     assert resultado.outputs["exitosos"] == 11 and resultado.outputs["fallidos"] == 1
 
 
-def test_toothcam_enviar_con_esperados_distinto_de_lo_procesado_es_err():
+def test_toothcam_enviar_con_patron_salida_espera_tambien_los_txt():
     clock = FakeClock()
+    fs = _toothcam_fs(clock, LOG_BY275, retraso=3)
 
-    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock, esperados=36)
-
-    assert resultado.status == "err"
-    assert "12" in resultado.message and "36" in resultado.message
-
-
-def test_toothcam_enviar_con_esperados_igual_es_ok():
-    clock = FakeClock()
-
-    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock, esperados=12)
+    resultado, _, clock = _toothcam_con(fs, clock, esperados=12, patron_salida=PATRON_TXT)
 
     assert resultado.status == "ok"
+    assert clock.monotonic() >= 10.0 * (len(LOG_BY275) + 3)  # el log llegó antes que los txt
 
 
-def test_toothcam_enviar_timeout_sin_finish_dice_hasta_donde_llego():
+def test_toothcam_enviar_con_patron_salida_un_modelo_fallido_no_lo_deja_esperando():
+    clock = FakeClock()
+    fs = _toothcam_fs(clock, _con_falla("BY275-U03-A"))
+
+    resultado, _, _ = _toothcam_con(fs, clock, esperados=12, patron_salida=PATRON_TXT)
+
+    assert resultado.status == "err"  # por la falla, no por timeout
+    assert "BY275-U03-A" in resultado.message
+
+
+def test_toothcam_enviar_timeout_con_esperados_dice_hasta_donde_llego():
     clock = FakeClock()
 
-    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275, fin=None), clock, timeout=45.0)
+    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock, esperados=36, timeout=300.0)
 
     assert resultado.status == "err"
-    assert "finish" in resultado.message and "4 procesados" in resultado.message
+    assert "12 de 36" in resultado.message
     assert resultado.outputs["log_file"] == "BY275.log"
 
 
-def test_toothcam_enviar_finish_sin_log_es_err():
-    clock = FakeClock()
-
-    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, []), clock)
-
-    assert resultado.status == "err"
-    assert "finish" in resultado.message
-
-
-def test_toothcam_enviar_ignora_un_finish_que_ya_estaba_de_otra_corrida():
+def test_toothcam_enviar_patron_salida_sin_esperados_es_err_antes_de_mover():
     clock = FakeClock()
     fs = _toothcam_fs(clock, LOG_BY275)
-    fs.dirs.add(SALIDA_CASO)
-    fs.files[f"{SALIDA_CASO}/finish"] = "viejo"
 
-    # El finish viejo tiene mtime 0 en el fake; el que deja ToothCAM al terminar
-    # lo reescribe. Sin que cambie, no cuenta.
-    original_list = fs.list_dir
+    resultado, fs, _ = _toothcam_con(fs, clock, patron_salida=PATRON_TXT)
 
-    def list_dir(path):
-        entradas = original_list(path)
-        if fs._vuelta() > len(fs.lineas):
-            return [replace(e, modified_at=99.0) if e.name == "finish" else e for e in entradas]
-        return entradas
+    assert resultado.status == "err"
+    assert "D:/casos/uno-gum.stl" in fs.files
 
-    fs.list_dir = list_dir
 
-    resultado, _, clock = _toothcam_con(fs, clock)
+def test_toothcam_enviar_patron_salida_invalido_es_err():
+    clock = FakeClock()
+
+    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock, esperados=12, patron_salida="(")
+
+    assert resultado.status == "err"
+    assert "patron_salida" in resultado.message
+
+
+def test_toothcam_enviar_el_finish_log_solo_no_cuenta_como_log():
+    clock = FakeClock()
+
+    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, []), clock, timeout=60.0)
+
+    assert resultado.status == "err"
+    assert "no apareció un log nuevo" in resultado.message
+
+
+def test_toothcam_enviar_sin_esperados_corta_en_la_primera_linea_n_de_n():
+    # El límite que 'esperados' viene a arreglar: sin el total, "1\1" parece el final.
+    clock = FakeClock()
+
+    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock)
 
     assert resultado.status == "ok"
-    assert resultado.outputs["exitosos"] == 12
+    assert resultado.outputs["exitosos"] == 1
