@@ -10,7 +10,8 @@ el otro — todo escrito en Mermaid, sin código.
 Quien opera nunca ve una URL en un flujo: los Bots se dan de alta una vez en
 la colección **Bots conocidos** (nombre, dirección, nota) y los nodos los
 nombran por su nombre. La misma colección tiene la acción **Probar**, que
-dice si el otro responde y cuántos runs tiene en vuelo.
+dice si el otro responde y cuántos runs tiene en vuelo, y **Abrir en pestaña**,
+que abre la pantalla del otro Bot en el navegador.
 
 Qué hace cada paso, en el idioma de la API del otro Bot:
 
@@ -106,6 +107,7 @@ from backend.core.ports import PortError
 
 TIMEOUT = "botsTimeout"
 MI_DIRECCION = "botsMiDireccion"
+MI_NOMBRE = "botsMiNombre"
 PREFIJO_API = "/api/core"
 _URL_VALIDA = re.compile(r"^https?://[^\s/]+(:\d+)?$")
 
@@ -218,7 +220,7 @@ MIGRAR_ACCION = Action(
 MANIFEST = PluginManifest(
     name="bots",
     label="Bots",
-    version="0.3.0",
+    version="0.4.0",
     doc="Hablar con otros Bots de la red desde un flujo: qué hacen, mandarles un caso, esperar el resultado.",
     ports=(port_names.HTTP, port_names.CLOCK),
     settings=(
@@ -235,12 +237,24 @@ MANIFEST = PluginManifest(
             "migrar sólo se puede pedir desde la propia máquina— ni el puerto de otra instalación de "
             "esta misma PC, que sería comparar y migrar el contenido de otro Bot.",
         ),
+        Setting(
+            MI_NOMBRE, ParamType.STR, label="Nombre de este Bot",
+            doc="Cómo se llama ESTE Bot, ej. 'Impresión 2'. La app lo pone en el título de la pestaña "
+            "del navegador, para distinguir varios Bots abiertos a la vez. Conviene que sea el mismo "
+            "nombre con que lo dieron de alta los otros Bots en 'Bots conocidos'.",
+        ),
     ),
     resources=(BOTS,),
     actions=(
         Action(
             "probar", "Probar",
             doc="Le pregunta al Bot si responde y cuántos runs tiene en vuelo.",
+            resource="bots",
+            params=(Param("nombre", required=True, options_from="bots"),),
+        ),
+        Action(
+            "abrir", "Abrir en pestaña",
+            doc="Abre la pantalla de ese Bot en una pestaña nueva del navegador.",
             resource="bots",
             params=(Param("nombre", required=True, options_from="bots"),),
         ),
@@ -1210,16 +1224,53 @@ def _migrar(ctx: ToolContext) -> ToolResult:
 
 
 def _probar(ctx: ToolContext) -> ToolResult:
+    """
+    Además del resumen, deja `indicador`: lo que la app guarda por fila para
+    dibujar el check verde (o la cruz) sin volver a apretar Probar. Va también
+    en el err, con estado "err", para que un check viejo se apague en cuanto
+    el otro Bot deja de responder — si sólo viniera en el ok, la fila seguiría
+    diciendo "conectado" de la última vez que anduvo.
+    """
+    bot = _bot(ctx, ctx.params["nombre"])
+    if isinstance(bot, ToolResult):
+        return _con_indicador(bot)
+    estado = _estado_de(ctx, bot)
+    if isinstance(estado, ToolResult):
+        return _con_indicador(estado)
+    mensaje = f"responde · {estado['corriendo']} en vuelo · último run {estado['ultimo_estado'] or 'ninguno'}"
+    return ToolResult.ok(
+        mensaje,
+        indicador={"estado": "ok", "texto": mensaje},
+        **{k: v for k, v in estado.items() if k != "url"},
+    )
+
+
+def _con_indicador(fallo: ToolResult) -> ToolResult:
+    fallo.outputs["indicador"] = {"estado": "err", "texto": fallo.message}
+    return fallo
+
+
+# ── Action: abrir un Bot conocido en el navegador ─────────────────────────
+
+
+def _abrir(ctx: ToolContext) -> ToolResult:
+    """
+    No abre nada: el plugin corre en el servidor y la pestaña es del
+    navegador. Devuelve `abrir_url` y la app hace el `window.open`.
+
+    No sondea al otro Bot antes: para ver si responde está Probar, y abrir la
+    pestaña de uno caído también sirve —el navegador dice qué pasa—. Sí valida
+    la dirección, para no abrir una pestaña con `ftp://` o con una ruta.
+
+    `?bot=<nombre>` lleva el nombre con que ESTE Bot lo conoce, para que la
+    pestaña que se abre se titule así aunque el otro todavía no tenga
+    configurado su propio nombre (`botsMiNombre`).
+    """
     bot = _bot(ctx, ctx.params["nombre"])
     if isinstance(bot, ToolResult):
         return bot
-    estado = _estado_de(ctx, bot)
-    if isinstance(estado, ToolResult):
-        return estado
-    return ToolResult.ok(
-        f"responde · {estado['corriendo']} en vuelo · último run {estado['ultimo_estado'] or 'ninguno'}",
-        **{k: v for k, v in estado.items() if k != "url"},
-    )
+    destino = f"{bot['url']}/?bot={quote(bot['nombre'], safe='')}"
+    return ToolResult.ok(f"Abrir {bot['nombre']} en {bot['url']}", abrir_url=destino, bot=bot["nombre"])
 
 
 def build_plugin() -> Plugin:
@@ -1234,6 +1285,7 @@ def build_plugin() -> Plugin:
         ],
         actions=[
             FunctionAction(action=MANIFEST.action("probar"), fn=_probar),
+            FunctionAction(action=MANIFEST.action("abrir"), fn=_abrir),
             FunctionAction(action=COMPARAR_ACCION, fn=_comparar_accion),
             FunctionAction(action=MIGRAR_ACCION, fn=_migrar),
         ],

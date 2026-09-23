@@ -899,3 +899,32 @@ def test_los_params_que_nombran_otro_plugin_dicen_de_donde_salen_sus_opciones():
 
     # migrar (Action), comparar (Action) y comparar (tool): las tres.
     assert sorted(revisadas) == ["bots.comparar", "comparar", "migrar"]
+
+
+def test_probar_deja_el_indicador_para_el_check_de_la_fila():
+    http = FakeHttp({f"{API2}/runs/en-vuelo": _json([]), f"{API2}/runs?limit=1": _json([])})
+    r, _ = _accion("probar", {"nombre": "Impresión 2"}, http)
+    assert r.status == "ok" and r.outputs["indicador"]["estado"] == "ok"
+
+
+def test_probar_un_bot_caido_apaga_el_indicador():
+    http = FakeHttp({f"{API2}/runs/en-vuelo": PortError("connection refused")})
+    r, _ = _accion("probar", {"nombre": "Impresión 2"}, http)
+    assert r.status == "err"
+    assert r.outputs["indicador"] == {"estado": "err", "texto": r.message}
+
+    r, _ = _accion("probar", {"nombre": "Ninguno"}, FakeHttp())
+    assert r.status == "err" and r.outputs["indicador"]["estado"] == "err"
+
+
+def test_abrir_devuelve_la_direccion_con_el_nombre_y_no_va_a_la_red():
+    http = FakeHttp()
+    r, _ = _accion("abrir", {"nombre": "Impresión 3"}, http)
+    assert r.status == "ok"
+    assert r.outputs["abrir_url"] == f"http://192.168.9.42:8000/?bot={quote('Impresión 3', safe='')}"
+    assert not http.calls
+
+
+def test_abrir_no_abre_una_direccion_rara():
+    r, _ = _accion("abrir", {"nombre": "Roto"}, FakeHttp())
+    assert r.status == "err" and "abrir_url" not in r.outputs

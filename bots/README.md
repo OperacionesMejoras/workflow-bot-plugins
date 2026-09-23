@@ -16,8 +16,22 @@ usa exactamente los mismos endpoints que este plugin. Están listados abajo.
 nota. La dirección es la que muestra el ícono de la bandeja del otro Bot en
 "Copiar dirección para otras PCs", por ejemplo `http://192.168.9.41:8000`.
 Cada fila tiene **Probar**: "responde · 0 en vuelo · último run ok", o "no
-responde en http://…". Un setting: cuántos segundos esperar antes de dar por
-caído a un Bot (15 por defecto).
+responde en http://…", y **Abrir en pestaña**, que abre la pantalla de ese Bot
+en el navegador. Settings: cuántos segundos esperar antes de dar por caído a
+un Bot (15 por defecto), y **Nombre de este Bot**, que la app pone en el
+título de la pestaña para distinguir varios Bots abiertos a la vez.
+
+### Lo que la app lee de este plugin
+
+El plugin no dibuja la pantalla ni escribe en la base: deja los datos y la
+app los usa sin conocer el plugin por nombre.
+
+| Dónde | Qué | Para qué |
+|---|---|---|
+| outputs de la Action `abrir` | `abrir_url`: `http://ip:puerto/?bot=<nombre>` | la app hace `window.open(abrir_url, "_blank")` en vez de mostrar el modal |
+| outputs de la Action `probar` | `indicador`: `{"estado": "ok"\|"err", "texto": …}` (en el ok **y** en el err) | la app lo guarda por fila y dibuja el check verde (o lo apaga) sin volver a apretar Probar |
+| tabla `settings`, clave `botsMiNombre` | el nombre de este Bot | título de la pestaña de este Bot |
+| query `?bot=` de la URL abierta | el nombre con que el otro Bot lo conoce | título de la pestaña si `botsMiNombre` está vacío |
 
 **Workflows.** Categoría **BOTS** en el selector de tool. Los nodos nombran
 al Bot por su nombre, nunca por URL:
