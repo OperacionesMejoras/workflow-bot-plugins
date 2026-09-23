@@ -14,17 +14,24 @@ Tres tools, y el orden en que aparecieron explica por qué hay tres:
 
   Lo que se verificó en esa versión y el tool asume: el exit code es 2
   siempre que ToothFORM llegue a terminar —también con un JSON inexistente—,
-  así que el resultado se lee del log y no del proceso. La excepción es el
-  rango de excepción de Windows (0xC0000005 y compañía): ahí la app no
-  terminó, se murió, y lo que haya quedado en el log no se puede creer. Se
-  muere así por volumen: `Toothform.exe` es x86 y sin LARGEADDRESSAWARE, o
-  sea 2 GB de memoria como techo por más RAM que tenga la máquina, y carga
-  de una todos los STL de la carpeta. Medido: 3 STL de 20 MB exportan en 43 s,
-  36 de 595 MB lo matan a los 32 s sin dejar log. Por eso el tool parte la
-  carpeta en tandas de `max_mb_por_tanda` y corre el ejecutable una vez por
-  tanda, copiando cada una a una carpeta propia —ToothFORM sólo sabe cargar
-  una carpeta entera— y juntando los resultados en una sola salida. El
-  log `<fecha>.<hora>.log` cae en `ExportPrintPath`; el export queda en
+  así que el resultado se lee del log y no del proceso. Cualquier otro
+  código es que no llegó: 0xC0000005 cuando se cae solo, 1 cuando lo matan
+  por afuera. Ahí el log, si lo hay, quedó a medias y no se puede creer —las
+  líneas que alcanzó a escribir dicen "Export successfully" y leídas por
+  palabras darían por bueno medio export.
+
+  Por qué se cae no se sabe. Medido el 22/09/2026 sobre el caso BY733 (36
+  STL, 595 MB): muere a los 32,5 s con 0xC0000005 habiendo llegado a 655 MB
+  de espacio de direcciones y 522 MB de private bytes. `Toothform.exe` es
+  x86 y sin LARGEADDRESSAWARE —techo de 2 GB—, así que ni se acercó: no es
+  falta de memoria. Un caso de 3 STL y 20 MB exporta en 43 s, pero son casos
+  distintos, o sea que tampoco está probado que sea la cantidad. Por eso el
+  tool parte la carpeta en tandas de `max_mb_por_tanda` y corre el ejecutable
+  una vez por tanda, copiando cada una a una carpeta propia —ToothFORM sólo
+  sabe cargar una carpeta entera—: no arregla la caída, pero deja un export
+  parcial en vez de nada y acota a qué datos mirarle.
+
+  El log `<fecha>.<hora>.log` cae en `ExportPrintPath`; el export queda en
   `<ExportPrintPath>\\<nombre del dato>\\` (el prefijo del STL antes del
   primer `-`); y una ruta con caracteres fuera de ASCII en el JSON hace que
   no exporte nada ni deje log, en cualquier codificación. Por eso el tool
@@ -157,21 +164,27 @@ _PATRON_TOTAL = re.compile(
 _PATRON_EXITO = re.compile(r"^(\S+)\s+Export successfully\s*$", re.I | re.M)
 
 
+# Medido contra el release 20260518: ToothFORM devuelve 2 cuando llega a
+# terminar, exporte bien o mal, y también con un JSON inexistente. Cualquier
+# otro código es que no llegó: 0xC0000005 cuando se cae solo, 1 cuando lo
+# matan por afuera. Por eso "distinto de cero" no sirve para decidir y "no es
+# de los que deja al terminar" sí.
+_TERMINA_EN = (0, 2)
+
+
+def _termino(exit_code: int) -> bool:
+    return exit_code in _TERMINA_EN
+
+
 def _crasheo(exit_code: int) -> bool:
-    """
-    ToothFORM termina en 2 aunque haya exportado todo bien, así que "distinto
-    de cero" no dice nada. Lo que sí dice es el rango de excepción de Windows
-    —0xC0000005 access violation, 0xC0000409 stack overrun, …—: con uno de
-    ésos el proceso no terminó, se murió, y lo que haya en el log es lo que
-    alcanzó a escribir antes de morirse.
-    """
+    """Si el código es una excepción de Windows (0xC0000005 y compañía). Sólo cambia el texto."""
     return exit_code < 0 or exit_code >= 0xC000_0000
 
 
 def _como_termino(exit_code: int) -> str:
-    return f"exit {exit_code}" + (
-        f" (0x{exit_code & 0xFFFF_FFFF:08X}, excepción de Windows)" if _crasheo(exit_code) else ""
-    )
+    if _crasheo(exit_code):
+        return f"exit {exit_code}, 0x{exit_code & 0xFFFF_FFFF:08X}: excepción de Windows"
+    return f"exit {exit_code}, cuando al terminar deja {' o '.join(str(c) for c in _TERMINA_EN)}"
 
 
 _SALIDAS_LOG = (
@@ -272,24 +285,28 @@ def _cuanto_carga(entradas: list) -> str:
     return f"; {len(entradas)} STL, {_peso(entradas) / _MB:.0f} MB a cargar de una"
 
 
-def _volumen(fs, carpeta: str) -> str:
+def _listar_o_nada(fs, carpeta: str) -> list | None:
     try:
-        return _cuanto_carga([(e.path, e.size) for e in _stl_de(fs, carpeta)])
+        return [(e.path, e.size) for e in _stl_de(fs, carpeta)]
     except PortError:
-        return ""  # el dato es para el diagnóstico: no vale frenar un export por él
+        return None  # el dato es para el diagnóstico: no vale frenar un export por él
 
 
 def _sin_log(exit_code: int, carpeta: str) -> str:
-    if _crasheo(exit_code):
+    """
+    Por qué no hay log. Dice qué pasó y dónde mirar, no por qué pasó: de la
+    causa el ejecutable no dejó nada, y afirmarla manda a buscar donde no está.
+    """
+    if _termino(exit_code):
         return (
-            f"ToothFORM se murió antes de escribir el log ({_como_termino(exit_code)}): no "
-            f"exportó nada de {carpeta}. Toothform.exe es de 32 bits y sin LARGEADDRESSAWARE: "
-            "no pasa de 2 GB de memoria por más RAM que tenga la máquina, y carga de una todos "
-            "los STL de la carpeta. Bajar 'max_mb_por_tanda' para que vayan en tandas más chicas."
+            f"ToothFORM terminó (exit {exit_code}) sin dejar un log: la carpeta de STL o la de "
+            "salida no existe para la app, o el JSON no se pudo leer"
         )
     return (
-        f"ToothFORM terminó (exit {exit_code}) sin dejar un log: la carpeta de STL o la de "
-        "salida no existe para la app, o el JSON no se pudo leer"
+        f"ToothFORM se cortó antes de escribir el log ({_como_termino(exit_code)}): no exportó "
+        f"nada de {carpeta} y no dejó dicho por qué. Para acorralarlo, bajar "
+        "'max_mb_por_tanda': con tandas más chicas el log dice cuáles alcanzó a exportar y "
+        "la que se corta deja a la vista qué datos tiene adentro."
     )
 
 
@@ -383,8 +400,8 @@ EXPORTAR = ToolManifest(
         "—o sólo los de 'archivos'—, exporta con QR a 'salida' y termina, sin abrir la "
         "ventana (release 20260518 o posterior). Espera a que termine y lee el log. Si la "
         "carpeta pesa más de 'max_mb_por_tanda' la parte en tandas y lo corre una vez por "
-        "tanda, porque ToothFORM es de 32 bits y una carpeta entera lo mata; las salidas "
-        "vienen unificadas y 'tandas' dice en cuántas fue. El "
+        "tanda: una carpeta de caso entera lo mata sin exportar nada, y así lo que salió "
+        "antes queda. Las salidas vienen unificadas y 'tandas' dice en cuántas fue. El "
         "export queda en <salida>\\<nombre del dato>. Cualquier parámetro de "
         "ParameterSettings del Toothform.ini se puede pasar como param extra (ej. "
         "LimitX=3.0). El ejecutable tiene que estar en process_allowlist, y las rutas ser ASCII."
@@ -408,11 +425,12 @@ EXPORTAR = ToolManifest(
         ),
         Param(
             "max_mb_por_tanda", ParamType.FLOAT, default=50.0,
-            doc="Cuántos MB de STL como máximo le entran a ToothFORM de una. Por arriba de eso "
-            "el tool parte la carpeta en tandas y lo corre una vez por tanda, juntando los "
-            "resultados. Toothform.exe es de 32 bits y sin LARGEADDRESSAWARE: tiene 2 GB de "
-            "memoria como techo por más RAM que haya, y una carpeta entera lo mata con "
-            "0xC0000005 antes de dejar log. 0 desactiva las tandas (todo de una, como antes).",
+            doc="Cuántos MB de STL le da a ToothFORM por vez. Por arriba de eso el tool parte "
+            "la carpeta en tandas y lo corre una vez por tanda, juntando los resultados. Una "
+            "carpeta de caso entera lo mata con 0xC0000005 sin dejar log y sin exportar nada; "
+            "en tandas, lo que salió antes de la que se corta queda exportado y el log dice "
+            "hasta dónde llegó. Más chico acorrala mejor pero tarda más: son ~14 s por STL "
+            "más el arranque de cada tanda. 0 desactiva las tandas (todo de una, como antes).",
         ),
     ),
     extra_params=True,
@@ -428,9 +446,10 @@ EXPORTAR = ToolManifest(
         Output("tandas", ParamType.INT, doc="En cuántas corridas de ToothFORM se partió el export."),
         Output(
             "exit_code", ParamType.INT,
-            doc="Con qué terminó Toothform.exe. Es 2 aun exportando bien, así que sólo sirve para "
-            "distinguir un crash: 3221225477 (0xC0000005) y demás códigos del rango 0xC0000000 "
-            "son excepciones de Windows, ahí la app se murió y el log quedó a medias o no salió.",
+            doc="Con qué terminó Toothform.exe. Cuando llega a terminar deja 2, exporte bien o "
+            "mal, así que no sirve para saber cómo le fue —eso sale del log— pero sí para "
+            "saber si llegó: cualquier otro código es que se cortó. 3221225477 (0xC0000005) "
+            "es que se cayó solo; 1, que lo mataron por afuera.",
         ),
     ),
 )
@@ -530,10 +549,10 @@ def _exportar(ctx: ToolContext) -> ToolResult:
                 origen = carpeta
                 # `fuentes` ya tiene el listado salvo que el share no se deje
                 # mirar; no se lo vuelve a pedir sólo para el log.
-                cuantos = _cuanto_carga(fuentes) if fuentes is not None else _volumen(fs, carpeta)
+                medido = fuentes if fuentes is not None else _listar_o_nada(fs, carpeta)
             else:
                 origen = entrada
-                cuantos = _cuanto_carga(grupo)
+                medido = grupo
                 if fs.exists(entrada):
                     fs.remove_tree(entrada)
                 fs.make_dirs(entrada)
@@ -542,6 +561,7 @@ def _exportar(ctx: ToolContext) -> ToolResult:
 
             config["FilesToProcess"]["OpenFolder"] = origen
             fs.write_text(ruta_config, json.dumps(config, indent=2))
+            cuantos = _cuanto_carga(medido) if medido is not None else ""
             ctx.log(f"{de}ToothFORM cmd: {tipo} de {origen} → {salida} ({ruta_config}){cuantos}")
 
             corrida = process.run(
@@ -560,15 +580,15 @@ def _exportar(ctx: ToolContext) -> ToolResult:
             anduvo, porque = corrido.sumar(fs, salida, reciente.name, texto)
             ctx.log(f"{de}{reciente.name}: {_primera(texto)[:160]}")
 
-            # Se murió exportando. Con la línea de totales, ToothFORM llegó a
-            # decir cómo le fue y el crash es de después: se respeta. Sin ella,
-            # el log quedó a medias y lo que alcanzó a escribir dice "Export
-            # successfully": leído por palabras da ok, el flujo seguiría por la
-            # rama buena y el caso avanzaría con la mitad de los datos.
-            if _crasheo(corrida.exit_code):
+            # No llegó a terminar. Con la línea de totales igual alcanzó a decir
+            # cómo le fue, así que se respeta: lo que se cortó es de después.
+            # Sin ella el log quedó a medias, y lo que alcanzó a escribir dice
+            # "Export successfully": leído por palabras da ok, el flujo seguiría
+            # por la rama buena y el caso avanzaría con la mitad de los datos.
+            if not _termino(corrida.exit_code):
                 if _PATRON_TOTAL.search(texto) is None:
                     return corrido.err(
-                        f"{de}ToothFORM se murió exportando ({_como_termino(corrida.exit_code)}): "
+                        f"{de}ToothFORM se cortó exportando ({_como_termino(corrida.exit_code)}): "
                         f"{reciente.name} quedó sin la línea de totales, con "
                         f"{len(corrido.exportados)} dato(s) exportado(s) de los que haya habido"
                     )

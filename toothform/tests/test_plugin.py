@@ -199,9 +199,9 @@ def test_exportar_sin_log_es_err_y_lo_dice_no_se_confunde_con_un_export_fallido(
 
 def test_exportar_anota_cuantos_stl_va_a_cargar_toothform_de_una():
     """
-    Toothform.exe es de 32 bits: 2 GB de techo, y carga la carpeta entera. El
-    volumen en el log es lo único que después explica un 0xC0000005 a los
-    treinta segundos, cuando ya no quedó log de la app que leer.
+    Cuando ToothFORM se cae no deja log ni dice por qué: lo único que queda
+    para correlacionar es cuánto le habían dado, y eso tiene que estar escrito
+    antes de correr —después del 0xC0000005 no hay de dónde sacarlo.
     """
     fs = FsConMtimes(dirs=(SALIDA,), files={
         f"{STL}/QATF001-L01-A.stl": "x" * 2_097_152,
@@ -231,6 +231,32 @@ def test_exportar_es_err_si_se_murio_a_la_mitad_aunque_el_log_diga_export_succes
     # El log igual se expone entero: es lo que el flujo copia a la carpeta del caso.
     assert resultado.outputs["hubo_log"] == "si"
     assert resultado.outputs["exportados"] == ["QATF001-L01-A", "QATF001-L02-A"]
+
+
+def test_exportar_es_err_si_lo_matan_por_afuera_con_el_log_a_medias():
+    """
+    Medido: un `taskkill /F` sobre Toothform.exe devuelve 1, que no es un
+    código de excepción de Windows. Si la regla mirara sólo el rango 0xC0000000
+    esto pasaría por bueno —el log a medias dice "Export successfully"— y el
+    caso avanzaría con la mitad de los datos. Lo que decide es que 1 no es de
+    los códigos que ToothFORM deja cuando llega a terminar.
+    """
+    fs = _disco()
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_A_MEDIAS, exit_code=1))
+
+    assert resultado.status == "err", resultado.message
+    assert "se cortó exportando" in resultado.message
+    assert resultado.outputs["exit_code"] == 1
+
+
+def test_exportar_es_err_si_lo_matan_por_afuera_sin_log():
+    fs = _disco()
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log=None, exit_code=1))
+
+    assert resultado.status == "err"
+    assert "se cortó antes de escribir el log" in resultado.message
+    # No inventa la causa: el ejecutable no dejó nada de por qué se cortó.
+    assert "memoria" not in resultado.message and "32 bits" not in resultado.message
 
 
 def test_exportar_respeta_el_log_completo_aunque_el_proceso_se_caiga_despues():
@@ -344,10 +370,11 @@ def test_exportar_rechaza_un_tipo_que_no_existe_y_una_carpeta_inexistente():
 
 # ── exportar: tandas ────────────────────────────────────────────────────
 #
-# Toothform.exe es de 32 bits y sin LARGEADDRESSAWARE: 2 GB de memoria como
-# techo, y carga de una todos los STL de la carpeta. Medido en producción, 3
-# STL de 20 MB exportan y 36 de 595 MB lo matan con 0xC0000005 antes de que
-# deje log. El tool parte la carpeta en tandas y junta los resultados.
+# Una carpeta de caso entera mata a ToothFORM con 0xC0000005 sin dejar log y
+# sin exportar nada —medido sobre BY733: 36 STL, 595 MB, muere a los 32,5 s—.
+# Por qué se cae no se sabe; no es falta de memoria (llegó a 655 MB de un
+# techo de 2 GB). En tandas al menos lo que salió antes de la que se corta
+# queda exportado, y el log dice hasta dónde llegó.
 
 UN_MB = "s" * 1_048_576
 
