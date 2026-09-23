@@ -1,6 +1,6 @@
 {
   "name": "toothform",
-  "description": "Exportar STL con QR y placa base en ToothFORM (línea de comandos o ventana) y leer su log. Incluye el camino fácil de ToothCAM: mover a la carpeta vigilada y esperar el resultado.",
+  "description": "Exportar STL con QR y placa base en ToothFORM (por cmd, en tandas para no pasar su techo de memoria, o por ventana) y leer su log. Incluye ToothCAM: mover a la carpeta vigilada y esperar.",
   "source": "workflow-bot-plugin-toothform",
   "path": "toothform",
   "ports": [

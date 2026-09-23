@@ -63,13 +63,35 @@ class ToothformFalso(FakeProcess):
         super().__init__()
         self.stub(EXE, exit_code=exit_code)
         self.fs, self.log, self.nombre, self.timed_out = fs, log, nombre, timed_out
+        self.cargadas: list[list[str]] = []
+
+    def _anotar(self, command) -> None:
+        """Qué STL vio ToothFORM en esta corrida: la carpeta de staging se borra al final."""
+        config = json.loads(self.fs.files[command[1]])
+        try:
+            self.cargadas.append(sorted(
+                e.name for e in self.fs.list_dir(config["FilesToProcess"]["OpenFolder"])
+            ))
+        except PortError:
+            self.cargadas.append(None)  # el fs del test no deja mirar; el real sí
 
     def run(self, command, *, cwd=None, timeout=None, env=None):
+        self._anotar(command)
         resultado = super().run(command, cwd=cwd, timeout=timeout, env=env)
         if self.log is not None:
             self.fs.write_text(f"{SALIDA}/{self.nombre}", self.log)
             self.fs.mtimes[self.nombre] = 1_000.0
         return replace(resultado, timed_out=self.timed_out)
+
+
+# Dos STL en la carpeta de entrada. Antes los tests la dejaban vacía porque
+# nadie la miraba; ahora el tool la lista para armar las tandas, y una carpeta
+# sin un solo .stl es un error con su propio test.
+STL_DE_PRUEBA = {f"{STL}/QATF001-L01-A.stl": "solid", f"{STL}/QATF001-U01-A.stl": "solid"}
+
+
+def _disco(files=None, dirs=(SALIDA,), mtimes=None):
+    return FsConMtimes({**STL_DE_PRUEBA, **(files or {})}, dirs, mtimes)
 
 
 def _ctx_factory(node_params, context=None, logs=None):
@@ -103,7 +125,7 @@ def _check_log(fs, clock=None, **params):
 
 
 def _exportar(fs=None, process=None, logs=None, **params):
-    fs = fs or FsConMtimes(dirs=(STL, SALIDA))
+    fs = fs or _disco()
     process = process or ToothformFalso(fs, LOG_OK)
     resultado = _registry(fs=fs, process=process).execute(
         "toothform.exportar",
@@ -156,7 +178,7 @@ def test_exportar_lee_el_log_y_expone_lo_mismo_que_check_log_mas_la_carpeta_del_
 
 
 def test_exportar_con_fallas_en_el_log_es_err_con_el_log_para_copiarlo():
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_FALLA))
 
     assert resultado.status == "err"
@@ -166,7 +188,7 @@ def test_exportar_con_fallas_en_el_log_es_err_con_el_log_para_copiarlo():
 
 
 def test_exportar_sin_log_es_err_y_lo_dice_no_se_confunde_con_un_export_fallido():
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log=None))
 
     assert resultado.status == "err"
@@ -193,21 +215,6 @@ def test_exportar_anota_cuantos_stl_va_a_cargar_toothform_de_una():
     assert any("2 STL, 3 MB a cargar de una" in m for m in logs), logs
 
 
-def test_exportar_corre_igual_si_no_puede_medir_la_carpeta():
-    """El volumen es diagnóstico: un share que no se deja listar no frena el export."""
-
-    class SinListar(FsConMtimes):
-        def list_dir(self, path):
-            if path == STL:
-                raise PortError("el share no contesta")
-            return super().list_dir(path)
-
-    fs = SinListar(dirs=(STL, SALIDA))
-    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK))
-
-    assert resultado.status == "ok", resultado.message
-
-
 def test_exportar_es_err_si_se_murio_a_la_mitad_aunque_el_log_diga_export_successfully():
     """
     El caso que puso un export incompleto en producción: ToothFORM se muere
@@ -215,7 +222,7 @@ def test_exportar_es_err_si_se_murio_a_la_mitad_aunque_el_log_diga_export_succes
     sin la de totales, y leerlo por palabras da ok —así el flujo seguía por la
     rama buena con la mitad de los datos exportados.
     """
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_A_MEDIAS, exit_code=CRASH))
 
     assert resultado.status == "err", resultado.message
@@ -231,7 +238,7 @@ def test_exportar_respeta_el_log_completo_aunque_el_proceso_se_caiga_despues():
     Con la línea de totales, ToothFORM ya dijo cómo le fue: el crash es de
     después y el export está hecho. Fallar ahí frenaría casos terminados.
     """
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK, exit_code=CRASH))
 
     assert resultado.status == "ok", resultado.message
@@ -241,7 +248,7 @@ def test_exportar_respeta_el_log_completo_aunque_el_proceso_se_caiga_despues():
 
 def test_exportar_con_un_log_sin_totales_pero_sin_crash_sigue_leyendose_por_palabras():
     """La lectura por palabras existe para versiones que no escriben totales; el crash no las toca."""
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_A_MEDIAS))
 
     assert resultado.status == "ok", resultado.message
@@ -249,7 +256,7 @@ def test_exportar_con_un_log_sin_totales_pero_sin_crash_sigue_leyendose_por_pala
 
 
 def test_exportar_sin_log_distingue_el_crash_de_una_ruta_que_la_app_no_ve():
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log=None, exit_code=CRASH))
 
     assert resultado.status == "err"
@@ -260,8 +267,8 @@ def test_exportar_sin_log_distingue_el_crash_de_una_ruta_que_la_app_no_ve():
 
 
 def test_exportar_ignora_un_log_viejo_que_ya_estaba_en_la_salida():
-    fs = FsConMtimes(
-        dirs=(STL,), files={f"{SALIDA}/20250101.09.00.00.log": LOG_OK},
+    fs = _disco(
+        files={f"{SALIDA}/20250101.09.00.00.log": LOG_OK},
         mtimes={"20250101.09.00.00.log": 10.0},
     )
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log=None))
@@ -271,7 +278,7 @@ def test_exportar_ignora_un_log_viejo_que_ya_estaba_en_la_salida():
 
 
 def test_exportar_con_timeout_es_err_sin_log():
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log=None, timed_out=True))
 
     assert resultado.status == "err"
@@ -303,7 +310,7 @@ def test_exportar_acepta_parametros_de_toothform_como_extras_y_rechaza_los_desco
 def test_exportar_respeta_el_maximo_de_simultaneas_y_devuelve_el_turno():
     from plugins.toothform import plugin as modulo
 
-    fs = FsConMtimes(dirs=(STL, SALIDA))
+    fs = _disco()
     process = ToothformFalso(fs, LOG_OK)
     factory = _ctx_factory({"ejecutable": EXE, "carpeta": STL, "salida": SALIDA, "timeout": 0.05})
 
@@ -335,6 +342,168 @@ def test_exportar_rechaza_un_tipo_que_no_existe_y_una_carpeta_inexistente():
     assert process.calls == []
 
 
+# ── exportar: tandas ────────────────────────────────────────────────────
+#
+# Toothform.exe es de 32 bits y sin LARGEADDRESSAWARE: 2 GB de memoria como
+# techo, y carga de una todos los STL de la carpeta. Medido en producción, 3
+# STL de 20 MB exportan y 36 de 595 MB lo matan con 0xC0000005 antes de que
+# deje log. El tool parte la carpeta en tandas y junta los resultados.
+
+UN_MB = "s" * 1_048_576
+
+
+def _log_de(*datos):
+    lineas = "".join(f"{d}    Export successfully\n" for d in datos)
+    return f"{lineas}\nTotal {len(datos)} models, of which {len(datos)} succeeded and 0 failed\n"
+
+
+class ToothformPorTandas(ToothformFalso):
+    """
+    Un log nuevo por corrida, como el real, y memoria de qué carpeta le tocó
+    cargar a cada una — que es lo que dice si las tandas se armaron bien.
+    """
+
+    def __init__(self, fs, logs, exit_code=2) -> None:
+        super().__init__(fs, log=None, exit_code=exit_code)
+        self.logs, self.corridas = list(logs), 0
+
+    def run(self, command, *, cwd=None, timeout=None, env=None):
+        self._anotar(command)
+        texto = self.logs[self.corridas] if self.corridas < len(self.logs) else None
+        self.corridas += 1
+        nombre = f"20260914.13.32.{self.corridas:02d}.log"
+        resultado = FakeProcess.run(self, command, cwd=cwd, timeout=timeout, env=env)
+        if texto is not None:
+            self.fs.write_text(f"{SALIDA}/{nombre}", texto)
+            self.fs.mtimes[nombre] = 1_000.0 + self.corridas
+        return resultado
+
+
+def _cuatro_mb():
+    return _disco(files={f"{STL}/QATF001-{n}.stl": UN_MB for n in ("L00-A", "L01-A", "U00-A", "U01-A")})
+
+
+def test_exportar_parte_la_carpeta_en_tandas_y_corre_toothform_una_vez_por_cada_una():
+    fs = _cuatro_mb()
+    process = ToothformPorTandas(fs, [
+        _log_de("QATF001-L00-A", "QATF001-L01-A"),
+        _log_de("QATF001-U00-A", "QATF001-U01-A"),
+    ])
+    resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=2.5)
+
+    assert resultado.status == "ok", resultado.message
+    assert process.corridas == 2
+    # Cada corrida ve sólo su tanda: la carpeta de entrada se vacía entre una y
+    # otra, si no la tanda anterior se exportaría de nuevo sin que nadie la pida.
+    assert process.cargadas == [
+        ["QATF001-L00-A.stl", "QATF001-L01-A.stl"],
+        ["QATF001-U00-A.stl", "QATF001-U01-A.stl"],
+    ]
+
+
+def test_las_salidas_de_todas_las_tandas_llegan_unificadas():
+    fs = _cuatro_mb()
+    process = ToothformPorTandas(fs, [
+        _log_de("QATF001-L00-A", "QATF001-L01-A"),
+        _log_de("QATF001-U00-A", "QATF001-U01-A"),
+    ])
+    resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=2.5)
+    salidas = resultado.outputs
+
+    assert salidas["tandas"] == 2
+    assert salidas["exitosos"] == 4 and salidas["fallidos"] == 0
+    assert salidas["exportados"] == [
+        "QATF001-L00-A", "QATF001-L01-A", "QATF001-U00-A", "QATF001-U01-A",
+    ]
+    assert salidas["log_files"] == ["20260914.13.32.01.log", "20260914.13.32.02.log"]
+    # El texto de las dos, con de cuál es cada parte.
+    assert salidas["log_texto"].count("Total 2 models") == 2
+    assert all(n in salidas["log_texto"] for n in salidas["log_files"])
+    # Con varias tandas la primera línea del último log no describe el export.
+    assert salidas["checkLogResult"]["message"] == "2 tandas: 4 exportados, 0 fallidos"
+    # El export de todas las tandas cae en la misma carpeta: la del caso.
+    assert salidas["carpeta_export"] == f"{SALIDA}/QATF001"
+
+
+def test_una_tanda_que_falla_corta_y_no_corre_las_que_quedan():
+    fs = _cuatro_mb()
+    # Con 1,5 MB de límite cada STL de 1 MB se va en su propia tanda: cuatro.
+    process = ToothformPorTandas(fs, [
+        _log_de("QATF001-L00-A"),
+        "QATF001-L01-A    Failed to hollow\n\nTotal 1 models, of which 0 succeeded and 1 failed\n",
+        _log_de("no deberia llegar"),
+        _log_de("tampoco"),
+    ])
+    resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=1.5)
+
+    assert resultado.status == "err"
+    assert "tanda 2/4" in resultado.message
+    assert process.corridas == 2, "las tandas 3 y 4 no tenían que correr"
+    # Lo que exportó antes de cortar se reporta igual: el caso quedó a medias y
+    # el flujo tiene que poder verlo.
+    assert resultado.outputs["exitosos"] == 1 and resultado.outputs["fallidos"] == 1
+    assert resultado.outputs["exportados"] == ["QATF001-L00-A"]
+
+
+def test_una_carpeta_que_entra_de_una_va_tal_cual_sin_copiar_nada():
+    fs = _disco()
+    resultado, _fs, process = _exportar(fs=fs)
+
+    assert resultado.status == "ok", resultado.message
+    assert resultado.outputs["tandas"] == 1
+    config = json.loads(fs.files[resultado.outputs["config"]])
+    assert config["FilesToProcess"]["OpenFolder"] == STL
+    assert not fs.exists(f"{SALIDA}/entrada-QATF001")
+
+
+def test_max_mb_por_tanda_en_cero_manda_la_carpeta_entera():
+    fs = _cuatro_mb()
+    process = ToothformPorTandas(fs, [_log_de("QATF001-L00-A")])
+    resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=0)
+
+    assert resultado.status == "ok", resultado.message
+    assert process.corridas == 1
+    assert process.cargadas[0] == [
+        "QATF001-L00-A.stl", "QATF001-L01-A.stl", "QATF001-U00-A.stl", "QATF001-U01-A.stl",
+    ]
+
+
+def test_un_stl_mas_grande_que_el_limite_se_va_solo_pero_se_va():
+    """Partirlo no se puede; dejarlo afuera sería exportar de menos sin decirlo."""
+    fs = _disco(files={f"{STL}/QATF001-L00-A.stl": UN_MB * 4, f"{STL}/QATF001-U00-A.stl": "chico"})
+    process = ToothformPorTandas(fs, [_log_de("QATF001-L00-A"), _log_de("QATF001-U00-A")])
+    resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=2.5)
+
+    assert resultado.status == "ok", resultado.message
+    assert ["QATF001-L00-A.stl"] in process.cargadas
+
+
+def test_exportar_es_err_si_la_carpeta_no_tiene_ningun_stl():
+    fs = FsConMtimes(dirs=(STL, SALIDA))
+    resultado, _fs, process = _exportar(fs=fs)
+
+    assert resultado.status == "err"
+    assert "no hay ningún .stl" in resultado.message
+    assert process.calls == []
+
+
+def test_si_la_carpeta_no_se_deja_listar_va_entera_como_antes_de_las_tandas():
+    """Un share que no contesta no puede frenar un export que hasta ayer andaba."""
+
+    class SinListar(FsConMtimes):
+        def list_dir(self, path):
+            if path == STL:
+                raise PortError("el share no contesta")
+            return super().list_dir(path)
+
+    fs = SinListar(dirs=(STL, SALIDA))
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK), max_mb_por_tanda=0.001)
+
+    assert resultado.status == "ok", resultado.message
+    assert resultado.outputs["tandas"] == 1
+    assert json.loads(fs.files[resultado.outputs["config"]])["FilesToProcess"]["OpenFolder"] == STL
+
+
 # ── exportar: sólo algunos archivos ─────────────────────────────────────
 #
 # ToothFORM por cmd sólo sabe cargar una carpeta entera (`OpenFolder` del
@@ -354,7 +523,9 @@ def test_exportar_archivos_sueltos_los_copia_a_una_carpeta_y_apunta_ahi():
     entrada = f"{SALIDA}/entrada-QATF001"
     assert json.loads(fs.read_text(resultado.outputs["config"]))["FilesToProcess"]["OpenFolder"] == entrada
     # Sólo los pedidos, con su nombre: el tercero no viaja.
-    assert sorted(p.rsplit("/", 1)[-1] for p in fs.files if p.startswith(entrada)) == ["dos.stl", "uno.stl"]
+    assert process.cargadas == [["dos.stl", "uno.stl"]]
+    # Y la carpeta de staging no queda: son copias que ya no le sirven a nadie.
+    assert not fs.exists(entrada)
 
 
 def test_exportar_vacia_la_carpeta_de_entrada_antes_de_copiar():

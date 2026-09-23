@@ -16,7 +16,14 @@ Tres tools, y el orden en que aparecieron explica por qué hay tres:
   siempre que ToothFORM llegue a terminar —también con un JSON inexistente—,
   así que el resultado se lee del log y no del proceso. La excepción es el
   rango de excepción de Windows (0xC0000005 y compañía): ahí la app no
-  terminó, se murió, y lo que haya quedado en el log no se puede creer. El
+  terminó, se murió, y lo que haya quedado en el log no se puede creer. Se
+  muere así por volumen: `Toothform.exe` es x86 y sin LARGEADDRESSAWARE, o
+  sea 2 GB de memoria como techo por más RAM que tenga la máquina, y carga
+  de una todos los STL de la carpeta. Medido: 3 STL de 20 MB exportan en 43 s,
+  36 de 595 MB lo matan a los 32 s sin dejar log. Por eso el tool parte la
+  carpeta en tandas de `max_mb_por_tanda` y corre el ejecutable una vez por
+  tanda, copiando cada una a una carpeta propia —ToothFORM sólo sabe cargar
+  una carpeta entera— y juntando los resultados en una sola salida. El
   log `<fecha>.<hora>.log` cae en `ExportPrintPath`; el export queda en
   `<ExportPrintPath>\\<nombre del dato>\\` (el prefijo del STL antes del
   primer `-`); y una ruta con caracteres fuera de ASCII en el JSON hace que
@@ -66,6 +73,7 @@ import json
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 
 from backend.core import ports as port_names
 from backend.core.contract import (
@@ -175,6 +183,30 @@ _SALIDAS_LOG = (
 )
 
 
+def _leer_log(texto: str) -> tuple[bool, str, int, int]:
+    """
+    Qué dice un log de ToothFORM: (anduvo, por qué no, exitosos, fallidos).
+
+    Aparte de `_interpretar_log`, que arma un `ToolResult`, porque exportar por
+    tandas necesita los números de cada corrida para sumarlos y un solo
+    resultado al final.
+    """
+    coincidencia = _PATRON_TOTAL.search(texto)
+    if coincidencia is not None:
+        total, exitosos, fallidos = (int(g) for g in coincidencia.groups())
+        if fallidos > 0:
+            return False, f"{fallidos} de {total} fallaron", exitosos, fallidos
+        return True, "", exitosos, fallidos
+
+    # Sin la línea de totales (otra versión de la app): decidir por las palabras.
+    bajo = texto.lower()
+    if "fail" in bajo or "error" in bajo:
+        return False, "el log reporta una falla", 0, 1
+    if "success" in bajo:
+        return True, "", 1, 0
+    return False, "el log no tiene un resultado reconocible", 0, 0
+
+
 def _interpretar_log(ctx: ToolContext, nombre: str, texto: str, **extra) -> ToolResult:
     """ok si el log no reporta fallas, err si las hay. `extra` son salidas más del tool que llama."""
     primera_linea = next((l.strip() for l in texto.splitlines() if l.strip()), "")
@@ -182,25 +214,143 @@ def _interpretar_log(ctx: ToolContext, nombre: str, texto: str, **extra) -> Tool
     resultado = {"log_file": nombre, "message": primera_linea}
     comunes = dict(log_file=nombre, checkLogResult=resultado, log_texto=texto, **extra)
 
-    coincidencia = _PATRON_TOTAL.search(texto)
-    if coincidencia is not None:
-        total, exitosos, fallidos = (int(g) for g in coincidencia.groups())
-        if fallidos > 0:
-            return ToolResult.err(f"{fallidos} de {total} fallaron", exitosos=exitosos, fallidos=fallidos, **comunes)
+    anduvo, porque, exitosos, fallidos = _leer_log(texto)
+    if anduvo:
         return ToolResult.ok(exitosos=exitosos, fallidos=fallidos, **comunes)
-
-    # Sin la línea de totales (otra versión de la app): decidir por las palabras.
-    bajo = texto.lower()
-    if "fail" in bajo or "error" in bajo:
-        return ToolResult.err("el log reporta una falla", exitosos=0, fallidos=1, **comunes)
-    if "success" in bajo:
-        return ToolResult.ok(exitosos=1, fallidos=0, **comunes)
-    return ToolResult.err("el log no tiene un resultado reconocible", exitosos=0, fallidos=0, **comunes)
+    return ToolResult.err(porque, exitosos=exitosos, fallidos=fallidos, **comunes)
 
 
 def _logs(fs, carpeta: str):
     return [e for e in fs.list_dir(carpeta) if not e.is_dir and e.name.lower().endswith(".log")]
 
+
+def _stl_de(fs, carpeta: str) -> list:
+    return [e for e in fs.list_dir(carpeta) if not e.is_dir and e.name.lower().endswith(".stl")]
+
+
+def _tandas(entradas: list, limite: int) -> list[list]:
+    """
+    Parte `[(ruta, bytes), ...]` en grupos que no pasen de `limite` bytes.
+
+    Un archivo más grande que el límite se va solo en su grupo: partirlo no se
+    puede, y dejarlo afuera sería exportar de menos sin decirlo.
+    """
+    grupos: list[list] = []
+    actual: list = []
+    peso = 0
+    for entrada in entradas:
+        if actual and peso + entrada[1] > limite:
+            grupos.append(actual)
+            actual, peso = [], 0
+        actual.append(entrada)
+        peso += entrada[1]
+    if actual:
+        grupos.append(actual)
+    return grupos
+
+
+_MB = 1024 * 1024
+
+
+def _primera(texto: str) -> str:
+    return next((l.strip() for l in texto.splitlines() if l.strip()), "")
+
+
+def _peso(entradas: list) -> int:
+    return sum(t for _ruta, t in entradas)
+
+
+def _tamano(fs, ruta: str) -> int:
+    try:
+        return fs.stat(ruta).size
+    except PortError:
+        return 0
+
+
+def _cuanto_carga(entradas: list) -> str:
+    """Lo que ToothFORM va a cargar de una: es lo que después explica un 0xC0000005."""
+    return f"; {len(entradas)} STL, {_peso(entradas) / _MB:.0f} MB a cargar de una"
+
+
+def _volumen(fs, carpeta: str) -> str:
+    try:
+        return _cuanto_carga([(e.path, e.size) for e in _stl_de(fs, carpeta)])
+    except PortError:
+        return ""  # el dato es para el diagnóstico: no vale frenar un export por él
+
+
+def _sin_log(exit_code: int, carpeta: str) -> str:
+    if _crasheo(exit_code):
+        return (
+            f"ToothFORM se murió antes de escribir el log ({_como_termino(exit_code)}): no "
+            f"exportó nada de {carpeta}. Toothform.exe es de 32 bits y sin LARGEADDRESSAWARE: "
+            "no pasa de 2 GB de memoria por más RAM que tenga la máquina, y carga de una todos "
+            "los STL de la carpeta. Bajar 'max_mb_por_tanda' para que vayan en tandas más chicas."
+        )
+    return (
+        f"ToothFORM terminó (exit {exit_code}) sin dejar un log: la carpeta de STL o la de "
+        "salida no existe para la app, o el JSON no se pudo leer"
+    )
+
+
+@dataclass
+class _Acumulado:
+    """
+    Lo que van dejando las tandas, para devolver un solo resultado al final.
+
+    Con una sola tanda las salidas son las mismas que antes de que las tandas
+    existieran: `log_file` el log, `log_texto` su texto y `checkLogResult` su
+    primera línea. Con varias, `log_texto` es la concatenación con un
+    encabezado por tanda y el `message` pasa a ser el resumen, porque la
+    primera línea de la última tanda no describe el export.
+    """
+
+    config: str
+    tandas: int
+    exit_code: int = 0
+    exitosos: int = 0
+    fallidos: int = 0
+    carpeta_export: str = ""
+    nombres: list = field(default_factory=list)
+    textos: list = field(default_factory=list)
+    exportados: list = field(default_factory=list)
+    vistos: set = field(default_factory=set)
+
+    def sumar(self, fs, salida: str, nombre: str, texto: str) -> tuple[bool, str]:
+        self.vistos.add(nombre)
+        self.nombres.append(nombre)
+        self.textos.append(texto)
+        self.exportados.extend(_PATRON_EXITO.findall(texto))
+        if not self.carpeta_export and self.exportados:
+            self.carpeta_export = fs.join(salida, self.exportados[0].split("-")[0])
+        anduvo, porque, exitosos, fallidos = _leer_log(texto)
+        self.exitosos += exitosos
+        self.fallidos += fallidos
+        return anduvo, porque
+
+    @property
+    def salidas(self) -> dict:
+        nombre = self.nombres[-1] if self.nombres else ""
+        if len(self.nombres) > 1:
+            texto = "\n".join(f"=== {n} ===\n{t}" for n, t in zip(self.nombres, self.textos))
+            mensaje = f"{len(self.nombres)} tandas: {self.exitosos} exportados, {self.fallidos} fallidos"
+        else:
+            texto = self.textos[0] if self.textos else ""
+            mensaje = _primera(texto)
+        return dict(
+            log_file=nombre, log_files=list(self.nombres),
+            checkLogResult={"log_file": nombre, "message": mensaje},
+            exitosos=self.exitosos, fallidos=self.fallidos, log_texto=texto,
+            hubo_log="si" if self.nombres else "no", exportados=list(self.exportados),
+            carpeta_export=self.carpeta_export, config=self.config,
+            exit_code=self.exit_code, tandas=self.tandas,
+        )
+
+    def ok(self) -> ToolResult:
+        return ToolResult.ok(**self.salidas)
+
+    def err(self, mensaje: str) -> ToolResult:
+        return ToolResult.err(mensaje, **self.salidas)
 
 # ── exportar ────────────────────────────────────────────────────────────
 
@@ -231,7 +381,10 @@ EXPORTAR = ToolManifest(
     doc=(
         "Corre Toothform.exe con un JSON de configuración: carga los STL de 'carpeta' "
         "—o sólo los de 'archivos'—, exporta con QR a 'salida' y termina, sin abrir la "
-        "ventana (release 20260518 o posterior). Espera a que termine y lee el log. El "
+        "ventana (release 20260518 o posterior). Espera a que termine y lee el log. Si la "
+        "carpeta pesa más de 'max_mb_por_tanda' la parte en tandas y lo corre una vez por "
+        "tanda, porque ToothFORM es de 32 bits y una carpeta entera lo mata; las salidas "
+        "vienen unificadas y 'tandas' dice en cuántas fue. El "
         "export queda en <salida>\\<nombre del dato>. Cualquier parámetro de "
         "ParameterSettings del Toothform.ini se puede pasar como param extra (ej. "
         "LimitX=3.0). El ejecutable tiene que estar en process_allowlist, y las rutas ser ASCII."
@@ -248,7 +401,19 @@ EXPORTAR = ToolManifest(
         ),
         Param("salida", ParamType.PATH, required=True, doc="Carpeta de salida: ahí caen el log, el JSON y <nombre del dato>\\ con el export."),
         Param("tipo", default="Type1", doc="Type1, Type2 o Type3, según cómo viene armado el dato."),
-        Param("timeout", ParamType.FLOAT, default=900.0, doc="Segundos máximos para que ToothFORM termine."),
+        Param(
+            "timeout", ParamType.FLOAT, default=900.0,
+            doc="Segundos máximos para que ToothFORM termine. Es por tanda, no por el total: "
+            "con varias tandas el tool corre el ejecutable una vez por cada una.",
+        ),
+        Param(
+            "max_mb_por_tanda", ParamType.FLOAT, default=50.0,
+            doc="Cuántos MB de STL como máximo le entran a ToothFORM de una. Por arriba de eso "
+            "el tool parte la carpeta en tandas y lo corre una vez por tanda, juntando los "
+            "resultados. Toothform.exe es de 32 bits y sin LARGEADDRESSAWARE: tiene 2 GB de "
+            "memoria como techo por más RAM que haya, y una carpeta entera lo mata con "
+            "0xC0000005 antes de dejar log. 0 desactiva las tandas (todo de una, como antes).",
+        ),
     ),
     extra_params=True,
     outputs=_SALIDAS_LOG + (
@@ -256,6 +421,11 @@ EXPORTAR = ToolManifest(
         Output("exportados", ParamType.JSON, doc="Nombres de los datos que exportaron bien."),
         Output("carpeta_export", ParamType.PATH, doc="<salida>\\<nombre del primer dato exportado>, donde ToothFORM dejó los archivos."),
         Output("config", ParamType.PATH, doc="El JSON que se le pasó a ToothFORM, para revisarlo."),
+        Output(
+            "log_files", ParamType.JSON,
+            doc="Los logs de todas las tandas, en orden. Con una sola tanda es `[log_file]`.",
+        ),
+        Output("tandas", ParamType.INT, doc="En cuántas corridas de ToothFORM se partió el export."),
         Output(
             "exit_code", ParamType.INT,
             doc="Con qué terminó Toothform.exe. Es 2 aun exportando bien, así que sólo sirve para "
@@ -294,43 +464,54 @@ def _exportar(ctx: ToolContext) -> ToolResult:
         )
 
     fs.make_dirs(salida)
+
+    # Qué se va a exportar, venga de 'archivos' o del contenido de 'carpeta'.
+    # Hacen falta las rutas con su tamaño para armar las tandas; sin ellas —un
+    # share que no se deja listar— se le pasa la carpeta entera, que es como se
+    # comportaba el tool antes de que las tandas existieran.
+    fuentes: list | None = None
     if archivos:
         faltan = [a for a in archivos if not fs.exists(a) or fs.is_dir(a)]
         if faltan:
             return ToolResult.err(f"no existen estos archivos: {', '.join(faltan)}")
-        # ToothFORM por cmd sólo sabe cargar una carpeta entera, así que los
-        # elegidos se copian a una propia. Se vacía antes: lo que quedó de una
-        # corrida anterior se exportaría de nuevo sin que nadie lo pidiera, y
-        # ése es el tipo de error que se ve como un export "de más" y no como
-        # una falla.
-        carpeta = fs.join(salida, f"entrada-{ctx.case_id or 'export'}")
-        if fs.exists(carpeta):
-            fs.remove_tree(carpeta)
-        fs.make_dirs(carpeta)
-        for origen in archivos:
-            fs.copy_file(origen, fs.join(carpeta, fs.basename(origen)))
-        ctx.log(f"{len(archivos)} archivo(s) copiados a {carpeta} para exportarlos solos")
-    elif not fs.exists(carpeta) or not fs.is_dir(carpeta):
-        return ToolResult.err(f"no existe la carpeta con los STL: {carpeta}")
+        fuentes = [(a, _tamano(fs, a)) for a in archivos]
+    else:
+        if not fs.exists(carpeta) or not fs.is_dir(carpeta):
+            return ToolResult.err(f"no existe la carpeta con los STL: {carpeta}")
+        try:
+            fuentes = [(e.path, e.size) for e in _stl_de(fs, carpeta)]
+        except PortError as exc:
+            ctx.log(f"no se pudo listar {carpeta} ({exc}): va entera, sin tandas", "warning")
+        if fuentes is not None and not fuentes:
+            return ToolResult.err(f"no hay ningún .stl en {carpeta}")
 
-    previos = {e.name for e in _logs(fs, salida)}
+    limite = int((ctx.params["max_mb_por_tanda"] or 0) * _MB)
+    if fuentes is None or (not archivos and (limite <= 0 or _peso(fuentes) <= limite)):
+        # Entra de una y ya está en su propia carpeta: se la pasamos tal cual,
+        # sin copiar nada. Es el camino de siempre.
+        grupos: list = [None]
+    else:
+        grupos = _tandas(fuentes, limite) if limite > 0 else [fuentes]
+        if len(grupos) > 1:
+            ctx.log(
+                f"{len(fuentes)} STL, {_peso(fuentes) / _MB:.0f} MB: van en {len(grupos)} tandas "
+                f"de hasta {limite / _MB:.0f} MB, que es lo que ToothFORM aguanta de una"
+            )
 
+    # ToothFORM por cmd sólo sabe cargar una carpeta entera, así que cada tanda
+    # se copia a una propia. Se vacía antes de cada una: lo que quedó de la
+    # anterior se exportaría de nuevo sin que nadie lo pidiera, y ése es el tipo
+    # de error que se ve como un export "de más" y no como una falla.
+    entrada = fs.join(salida, f"entrada-{ctx.case_id or 'export'}")
+    ruta_config = fs.join(salida, f"toothform-{ctx.case_id or 'export'}.json")
     config = {
         "FilesToProcess": {"OpenFolder": carpeta, "Type": tipo},
         "General": {"ExportPrintPath": salida, "ExportFilePath": salida},
         "ParameterSettings": {**_PARAMETROS_DEFAULT, **{k: str(v) for k, v in ctx.extras.items()}},
     }
-    ruta_config = fs.join(salida, f"toothform-{ctx.case_id or 'export'}.json")
-    fs.write_text(ruta_config, json.dumps(config, indent=2))
-    # ToothFORM carga de una todos los STL de la carpeta, y es un proceso de 32
-    # bits: 2 GB de techo. Dejar el volumen en el log es lo que después explica
-    # un 0xC0000005 a los treinta segundos, cuando ya no hay nada que leer.
-    try:
-        stl = [e for e in fs.list_dir(carpeta) if not e.is_dir and e.name.lower().endswith(".stl")]
-        volumen = f"; {len(stl)} STL, {sum(e.size for e in stl) / (1024 * 1024):.0f} MB a cargar de una"
-    except PortError:
-        volumen = ""  # el dato es para el diagnóstico: no vale frenar un export por él
-    ctx.log(f"ToothFORM cmd: {tipo} de {carpeta} → {salida} ({ruta_config}){volumen}")
+
+    corrido = _Acumulado(config=ruta_config, tandas=len(grupos))
+    corrido.vistos = {e.name for e in _logs(fs, salida)}
 
     timeout = ctx.params["timeout"]
     maximo = int(ctx.config(MAX_SIMULTANEOS) or 0)
@@ -343,60 +524,72 @@ def _exportar(ctx: ToolContext) -> ToolResult:
                 f"(máximo {maximo}, setting {MAX_SIMULTANEOS})"
             )
     try:
-        corrida = process.run([ejecutable, ruta_config], cwd=fs.parent(ejecutable) or None, timeout=timeout)
+        for numero, grupo in enumerate(grupos, 1):
+            de = f"tanda {numero}/{len(grupos)}: " if len(grupos) > 1 else ""
+            if grupo is None:
+                origen = carpeta
+                # `fuentes` ya tiene el listado salvo que el share no se deje
+                # mirar; no se lo vuelve a pedir sólo para el log.
+                cuantos = _cuanto_carga(fuentes) if fuentes is not None else _volumen(fs, carpeta)
+            else:
+                origen = entrada
+                cuantos = _cuanto_carga(grupo)
+                if fs.exists(entrada):
+                    fs.remove_tree(entrada)
+                fs.make_dirs(entrada)
+                for ruta, _bytes in grupo:
+                    fs.copy_file(ruta, fs.join(entrada, fs.basename(ruta)))
+
+            config["FilesToProcess"]["OpenFolder"] = origen
+            fs.write_text(ruta_config, json.dumps(config, indent=2))
+            ctx.log(f"{de}ToothFORM cmd: {tipo} de {origen} → {salida} ({ruta_config}){cuantos}")
+
+            corrida = process.run(
+                [ejecutable, ruta_config], cwd=fs.parent(ejecutable) or None, timeout=timeout,
+            )
+            corrido.exit_code = corrida.exit_code
+            if corrida.timed_out:
+                return corrido.err(f"{de}ToothFORM no terminó en {timeout:g} s")
+
+            nuevos = [e for e in _logs(fs, salida) if e.name not in corrido.vistos]
+            if not nuevos:
+                return corrido.err(de + _sin_log(corrida.exit_code, origen))
+
+            reciente = max(nuevos, key=lambda e: e.modified_at)
+            texto = fs.read_text(reciente.path, encoding="utf-8")
+            anduvo, porque = corrido.sumar(fs, salida, reciente.name, texto)
+            ctx.log(f"{de}{reciente.name}: {_primera(texto)[:160]}")
+
+            # Se murió exportando. Con la línea de totales, ToothFORM llegó a
+            # decir cómo le fue y el crash es de después: se respeta. Sin ella,
+            # el log quedó a medias y lo que alcanzó a escribir dice "Export
+            # successfully": leído por palabras da ok, el flujo seguiría por la
+            # rama buena y el caso avanzaría con la mitad de los datos.
+            if _crasheo(corrida.exit_code):
+                if _PATRON_TOTAL.search(texto) is None:
+                    return corrido.err(
+                        f"{de}ToothFORM se murió exportando ({_como_termino(corrida.exit_code)}): "
+                        f"{reciente.name} quedó sin la línea de totales, con "
+                        f"{len(corrido.exportados)} dato(s) exportado(s) de los que haya habido"
+                    )
+                ctx.log(
+                    f"{de}ToothFORM dejó el log entero pero {_como_termino(corrida.exit_code)}",
+                    "warning",
+                )
+            if not anduvo:
+                return corrido.err(de + porque)
     finally:
         if maximo > 0:
             _TURNOS.soltar()
-    sin_log = dict(
-        log_file="", checkLogResult={"log_file": "", "message": ""}, exitosos=0, fallidos=0,
-        log_texto="", hubo_log="no", exportados=[], carpeta_export="", config=ruta_config,
-        exit_code=corrida.exit_code,
-    )
-    if corrida.timed_out:
-        return ToolResult.err(f"ToothFORM no terminó en {timeout:g} s", **sin_log)
 
-    nuevos = [e for e in _logs(fs, salida) if e.name not in previos]
-    if not nuevos:
-        if _crasheo(corrida.exit_code):
-            return ToolResult.err(
-                f"ToothFORM se murió antes de escribir el log ({_como_termino(corrida.exit_code)}): no "
-                f"exportó nada de {carpeta}. Toothform.exe es de 32 bits y sin "
-                "LARGEADDRESSAWARE: no pasa de 2 GB de memoria por más RAM que tenga la "
-                "máquina, y carga TODOS los STL de la carpeta, no sólo los que el flujo "
-                "filtró. Con una carpeta grande se queda sin espacio y muere antes del log. "
-                "Para eso está 'archivos': mandarle sólo los que se van a exportar, de a tandas.",
-                **sin_log,
-            )
-        return ToolResult.err(
-            f"ToothFORM terminó (exit {corrida.exit_code}) sin dejar un log en {salida}: "
-            "la carpeta de STL o la de salida no existe para la app, o el JSON no se pudo leer",
-            **sin_log,
-        )
-    reciente = max(nuevos, key=lambda e: e.modified_at)
-    texto = fs.read_text(reciente.path, encoding="utf-8")
-    exportados = _PATRON_EXITO.findall(texto)
-    carpeta_export = fs.join(salida, exportados[0].split("-")[0]) if exportados else ""
-    resultado = _interpretar_log(
-        ctx, reciente.name, texto, hubo_log="si", exportados=exportados,
-        carpeta_export=carpeta_export, config=ruta_config, exit_code=corrida.exit_code,
-    )
-    if not _crasheo(corrida.exit_code):
-        return resultado
-    # Se murió exportando. Si el log tiene la línea de totales, ToothFORM llegó
-    # a decir cómo le fue y el crash es de después; se respeta lo que dijo. Si
-    # no la tiene, el log quedó a medias y las líneas que alcanzó a escribir
-    # dicen "Export successfully": leído por palabras eso da ok, el flujo sigue
-    # por la rama buena y el caso avanza con la mitad de los datos exportados.
-    if _PATRON_TOTAL.search(texto) is not None:
-        ctx.log(f"ToothFORM dejó el log entero pero {_como_termino(corrida.exit_code)}", "warning")
-        return resultado
-    if resultado.status != STATUS_OK:
-        return resultado
-    return ToolResult.err(
-        f"ToothFORM se murió exportando ({_como_termino(corrida.exit_code)}): {reciente.name} quedó sin la "
-        f"línea de totales, con {len(exportados)} dato(s) exportado(s) de los que haya habido",
-        **resultado.outputs,
-    )
+    # Terminó bien: las copias de la última tanda ya no le sirven a nadie y se
+    # acumulan una por caso. Si hubo error quedan, que es de lo único que se
+    # puede reproducir la corrida que falló.
+    if fs.exists(entrada):
+        fs.remove_tree(entrada)
+    if len(grupos) > 1:
+        ctx.log(f"{len(grupos)} tandas: {corrido.exitosos} exportados, {corrido.fallidos} fallidos")
+    return corrido.ok()
 
 
 # ── add_qr ──────────────────────────────────────────────────────────────
