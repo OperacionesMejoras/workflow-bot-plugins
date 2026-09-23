@@ -30,6 +30,7 @@ from backend.core.contract import (
     ToolManifest,
     ToolResult,
 )
+from backend.core.ports import PortError
 
 MANIFEST = PluginManifest(
     name="archivos",
@@ -228,6 +229,32 @@ BUSCAR = ToolManifest(
 _SIN_NADA = {"rutas": [], "cantidad": 0, "primera": "", "carpeta": "", "carpetas": []}
 
 
+def _hijos(ctx: ToolContext, fs, carpeta: str) -> list:
+    """
+    Las entradas que cuelgan directo de `carpeta`, sin bajar más.
+
+    `walk(max_depth=1)` es lo que hace falta y lo que menos cuesta: emite las
+    carpetas SIN statearlas (core#33, núcleo v0.3.1-beta.12). Un núcleo anterior
+    no conoce el argumento, y ahí `list_dir` da lo mismo pero pagando un stat por
+    entrada: sobre el share de casos terminados —49.684 en el primer nivel— son
+    ~80s contra ~1,4s, y de esos 80 casi todos son stats que se tiran.
+
+    Se degrada, no se rompe: `archivos` tiene que poder instalarse en un Bot que
+    todavía no actualizó el núcleo. El TypeError se atrapa en la llamada y no
+    alrededor del consumo, para no confundirlo con uno de adentro del walk.
+    """
+    try:
+        entradas = fs.walk(carpeta, max_depth=1)
+    except TypeError:
+        ctx.log(
+            "este núcleo no tiene walk(max_depth=...) (core#33, v0.3.1-beta.12): "
+            "se listan los hijos con stat, que sobre una carpeta grande es mucho más lento",
+            "warning",
+        )
+        return list(fs.list_dir(carpeta))
+    return list(entradas)
+
+
 def _bajar_a(ctx: ToolContext, fs, carpeta: str, etiqueta: str):
     """
     La subcarpeta DIRECTA de `carpeta` que contiene `etiqueta` en el nombre; con
@@ -238,22 +265,28 @@ def _bajar_a(ctx: ToolContext, fs, carpeta: str, etiqueta: str):
     seguidos si ordeno", que depende del nivel en que estén y de que la etiqueta
     sea prefijo.
 
-    Se paga `list_dir`, que statea cada entrada: contra una carpeta de casos
-    terminados con ~50k casos son ~80s, de los cuales ~78 son stats que no se
-    usan —hacen falta los nombres, y el mtime de las dos o tres que matchean—.
-    Es el precio de que el port no ofrezca un listado sin stat; aun así es un
-    orden de magnitud menos que recorrer el árbol entero, que son ~18 minutos y
-    seis millones de archivos visitados. Pedido en workflow-bot-core#33.
+    Hacen falta los nombres de acá abajo y el mtime de las dos o tres que
+    matcheen; ver `_hijos` para lo que cuesta cada forma de conseguirlos.
     """
     baja = etiqueta.lower()
-    candidatas = [e for e in fs.list_dir(carpeta) if e.is_dir and baja in e.name.lower()]
+    candidatas = [e for e in _hijos(ctx, fs, carpeta) if e.is_dir and baja in e.name.lower()]
     if not candidatas:
         return ToolResult.err(
             f"ninguna subcarpeta de {carpeta} tiene '{etiqueta}' en el nombre", **_SIN_NADA)
 
-    # Por fecha, y el nombre desempata para que dos con la misma fecha no
-    # dependan del orden en que las devolvió el filesystem.
-    candidatas.sort(key=lambda e: (-e.modified_at, e.name))
+    # `walk` no statea las carpetas —de eso se trata—, así que el mtime se pide
+    # aparte, y sólo el de las candidatas. Una que no se pueda statear va al
+    # fondo en vez de tumbar la elección: que sobre una es motivo de warning,
+    # no de que el flujo se caiga.
+    fechas = {}
+    for e in candidatas:
+        try:
+            fechas[e.path] = fs.stat(e.path).modified_at
+        except PortError:
+            fechas[e.path] = 0.0
+    # El nombre desempata, para que dos con la misma fecha no dependan del
+    # orden en que las devolvió el filesystem.
+    candidatas.sort(key=lambda e: (-fechas[e.path], e.name))
     elegida = candidatas[0]
     if len(candidatas) > 1:
         # Warning y no error: con un id repetido —un caso rehecho, un apellido

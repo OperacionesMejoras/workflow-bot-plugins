@@ -12,7 +12,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
 from backend.core.contract import ToolContext  # noqa: E402
 from backend.core.registry import ToolRegistry  # noqa: E402
-from backend.tests.fakes import FakeFs  # noqa: E402
+from backend.tests.fakes import FakeFs, _norm  # noqa: E402
 
 from plugins.archivos.plugin import build_plugin  # noqa: E402
 
@@ -145,6 +145,14 @@ class FsConFechas(FakeFs):
             return dataclasses.replace(info, modified_at=self.fechas[info.path])
         return info
 
+    def walk(self, path, max_depth=None):
+        """`walk` con `max_depth` (core#33). El FakeFs del núcleo vendorizado
+        todavía no lo tiene, así que sin esto sólo se probaría la degradación."""
+        hondo = len(_norm(path).split("/"))
+        for info in super().walk(path):
+            if max_depth is None or len(info.path.split("/")) - hondo <= max_depth:
+                yield info
+
 
 RAIZ = "//server/CASOS TERMINADOS"
 # El caso real: el mismo id dos veces, la segunda por un apellido mal tipeado.
@@ -220,3 +228,64 @@ def test_un_caso_que_no_esta_se_distingue_de_un_caso_vacio():
     r = _en_casos(subcarpeta="BX999", patron=r"^no-existe$")
     assert r.status == "err"
     assert "ningún archivo" in r.message and "BX999 Otro 1.0" in r.message
+
+
+def test_usa_walk_con_max_depth_cuando_el_nucleo_lo_tiene():
+    # core#33: pide los hijos directos sin statearlos. Lo que se verifica es que
+    # el argumento viaje — el costo no se ve desde un fake.
+    class Espia(FsConFechas):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.walks, self.list_dirs = [], []
+
+        def walk(self, path, max_depth=None):
+            self.walks.append(max_depth)
+            yield from super().walk(path, max_depth=max_depth)
+
+        def list_dir(self, path):
+            self.list_dirs.append(path)
+            return super().list_dir(path)
+
+    fs = Espia(files=CASOS, fechas=FECHAS)
+    reg = ToolRegistry(adapters={"fs": fs})
+    reg._add_plugin("archivos", "plugins.archivos:PLUGIN", build_plugin())
+
+    def factory(declaracion, ports=None):
+        d, e = declaracion.split_params(
+            {"carpeta": RAIZ, "subcarpeta": "BX718", "patron": ENTREGABLE}, {})
+        return ToolContext(
+            run_id="r", case_id="BX718", params=d, extras=e, config={}, context={},
+            log=lambda *_a, **_k: None, ports=ports or {})
+
+    r = reg.execute("archivos.buscar", factory)
+    assert r.status == "ok"
+    assert fs.walks[0] == 1          # la fase 1 no baja más de un nivel
+    assert fs.list_dirs == []        # y no paga el listado con stat
+
+
+def test_contra_un_nucleo_sin_max_depth_sigue_andando_y_avisa():
+    # Un Bot que todavía no actualizó. El fake tiene que ser fiel en esto: el
+    # núcleo viejo no declara `max_depth`, así que el TypeError sale al LIGAR
+    # los argumentos, antes de entrar al generador. Un fake que lo levante
+    # adentro del cuerpo lo tira recién al consumirlo, que es otro momento, y
+    # el try/except —puesto a propósito alrededor de la llamada y no del
+    # consumo, para no tragarse un TypeError de adentro del walk— no lo vería.
+    class Viejo(FsConFechas):
+        def walk(self, path):
+            yield from FakeFs.walk(self, path)
+
+    registro = []
+    reg = ToolRegistry(adapters={"fs": Viejo(files=CASOS, fechas=FECHAS)})
+    reg._add_plugin("archivos", "plugins.archivos:PLUGIN", build_plugin())
+
+    def factory(declaracion, ports=None):
+        d, e = declaracion.split_params(
+            {"carpeta": RAIZ, "subcarpeta": "BX718", "patron": ENTREGABLE}, {})
+        return ToolContext(
+            run_id="r", case_id="BX718", params=d, extras=e, config={}, context={},
+            log=lambda m, level="info": registro.append((level, m)), ports=ports or {})
+
+    r = reg.execute("archivos.buscar", factory)
+    assert r.status == "ok"
+    assert r.outputs["carpeta"] == NUEVA   # mismo resultado que por el camino rápido
+    assert any(nivel == "warning" and "core#33" in m for nivel, m in registro), registro
