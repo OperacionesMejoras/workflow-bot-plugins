@@ -52,5 +52,5 @@ del núcleo; comentarios y commits en castellano que explican el por qué.
 |---|---|---|
 | `archivos` | mover, copiar, eliminar, renombrar y buscar (etiqueta o regex) | fs |
 | `procesos` | saber si un programa está corriendo | process |
-| `toothform` | exportar STL con QR en ToothFORM (cmd o ventana) y leer su log; trae el release de la app en `toothform/instalador/` | process, fs, clock, window |
+| `toothform` | exportar STL con QR en ToothFORM (cmd o ventana) y leer su log; el release de la app está aparte, en `instaladores/toothform/`, para que no viaje con el plugin | process, fs, clock, window |
 | `bots` | hablar con otros Bots de la red: qué hacen, mandarles un caso sin esperar, esperar el resultado; la API que usa un agente remoto (ver `bots/README.md`) | http, clock |

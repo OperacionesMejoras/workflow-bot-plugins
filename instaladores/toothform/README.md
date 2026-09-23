@@ -2,8 +2,11 @@
 
 `Toothform-20260518/` es la copia portable del release del 18/05/2026 tal
 como lo entrega el proveedor (`\\SERVER-NUEVO\Instaladores\TOOTHFORM`), con
-sus instrucciones en castellano en `instrucciones/`. Viaja con el plugin —sí,
-binarios en el repo— para llevar el Bot y la app juntos a una PC nueva.
+sus instrucciones en castellano en `instrucciones/`. Está en el repo —sí,
+binarios— para llevar el Bot y la app juntos a una PC nueva, pero fuera de
+`toothform/`, a propósito: instalar el plugin copia su carpeta entera, y así
+no arrastra 7 MB de `.exe`/`.dll` que el plugin no usa (y que el antivirus
+revisa uno por uno en cada instalación). A la PC la app se lleva a mano.
 
 **Lo que no está, a propósito:**
 
