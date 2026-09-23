@@ -693,7 +693,7 @@ TOOTHCAM_ENVIAR = ToolManifest(
     label="ToothCAM: enviar y esperar",
     category="TOOTHCAM",
     doc=(
-        "Mueve 'archivos' -o todo lo que haya en 'carpeta'- a 'carpeta_watch' -la carpeta que ToothCAM ya tiene "
+        "Mueve (o copia, con 'copiar') 'archivos' -o todo lo que haya en 'carpeta'- a 'carpeta_watch' -la carpeta que ToothCAM ya tiene "
         "vigilada con 'Watch directory' + 'Scan dir.' + 'Compute' activados a "
         "mano en la app- y espera a que aparezca un .log nuevo en "
         "'carpeta_salida', reintentando cada 'intervalo' segundos hasta "
@@ -715,13 +715,17 @@ TOOTHCAM_ENVIAR = ToolManifest(
             doc="Alternativa a 'carpeta': rutas de los STL/PTS del caso (todos los que ToothCAM "
             "necesite juntos: gum, tooth, att, etc.).",
         ),
+        Param(
+            "copiar", ParamType.BOOL, default=False,
+            doc="Copiar en vez de mover: los originales quedan donde estaban. Sin tildar, los mueve.",
+        ),
         Param("carpeta_watch", ParamType.PATH, required=True, doc="La carpeta que ToothCAM tiene asignada en 'Watch directory'."),
         Param("carpeta_salida", ParamType.PATH, required=True, doc="Donde ToothCAM deja el/los log (normalmente 'batch_result' dentro de la carpeta vigilada)."),
         Param("intervalo", ParamType.FLOAT, default=5.0, doc="Segundos entre cada chequeo de si ya apareció el log."),
         Param("timeout", ParamType.FLOAT, default=900.0, doc="Segundos máximos totales de espera antes de darse por vencido."),
     ),
     outputs=_SALIDAS_LOG + (
-        Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch', en el mismo orden que 'archivos' (o que el listado de 'carpeta')."),
+        Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch' (movidos o copiados), en el mismo orden que 'archivos' (o que el listado de 'carpeta')."),
     ),
 )
 
@@ -764,8 +768,13 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
     fs.make_dirs(carpeta_salida)
     previos = {e.name for e in _logs(fs, carpeta_salida)}
 
-    movidos = [fs.move(origen, fs.join(carpeta_watch, fs.basename(origen))) for origen in archivos]
-    ctx.log(f"{len(movidos)} archivo(s) movidos a {carpeta_watch} (ToothCAM en modo watch)")
+    copiar = bool(ctx.params.get("copiar"))
+    enviar = fs.copy_file if copiar else fs.move
+    movidos = [enviar(origen, fs.join(carpeta_watch, fs.basename(origen))) for origen in archivos]
+    ctx.log(
+        f"{len(movidos)} archivo(s) {'copiados' if copiar else 'movidos'} a {carpeta_watch} "
+        "(ToothCAM en modo watch)"
+    )
 
     intervalo, timeout = ctx.params["intervalo"], ctx.params["timeout"]
     limite = clock.monotonic() + timeout

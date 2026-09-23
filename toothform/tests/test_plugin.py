@@ -851,3 +851,18 @@ def test_toothcam_enviar_con_la_carpeta_vigilada_como_origen_es_err():
     resultado, _, _ = _toothcam_enviar(fs, carpeta="D:\toothcam_watch\\")
 
     assert resultado.status == "err"
+
+
+def test_toothcam_enviar_con_copiar_deja_los_originales_donde_estaban():
+    clock = FakeClock()
+    fs = FsLogDemorado(
+        clock, "20260101.log", aparece_en=3.0,
+        files={"D:/casos/uno/uno-gum.stl": "g", "D:/casos/uno/uno.pts": "p", f"{RESULT}/20260101.log": LOG_OK},
+        dirs=(WATCH, RESULT, "D:/casos/uno"),
+    )
+
+    resultado, fs, _ = _toothcam_enviar(fs, clock, carpeta="D:/casos/uno", copiar=True, intervalo=3.0)
+
+    assert resultado.status == "ok"
+    assert sorted(resultado.outputs["archivos_movidos"]) == [f"{WATCH}/uno-gum.stl", f"{WATCH}/uno.pts"]
+    assert "D:/casos/uno/uno-gum.stl" in fs.files and f"{WATCH}/uno-gum.stl" in fs.files
