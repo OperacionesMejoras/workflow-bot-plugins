@@ -805,3 +805,49 @@ def test_toothcam_enviar_archivos_vacio_es_err():
     resultado, _, _ = _toothcam_enviar(FakeFs(dirs=(WATCH, RESULT)), archivos=[])
 
     assert resultado.status == "err"
+
+
+def test_toothcam_enviar_con_carpeta_mueve_todo_lo_de_adentro_sin_filtrar_por_extension():
+    clock = FakeClock()
+    fs = FsLogDemorado(
+        clock, "20260101.log", aparece_en=3.0,
+        files={
+            "D:/casos/uno/uno-gum.stl": "g", "D:/casos/uno/uno-tooth.stl": "t",
+            "D:/casos/uno/uno.pts": "p", "D:/casos/uno/sub/otro.stl": "x",
+            f"{RESULT}/20260101.log": LOG_OK,
+        },
+        dirs=(WATCH, RESULT, "D:/casos/uno", "D:/casos/uno/sub"),
+    )
+
+    resultado, fs, _ = _toothcam_enviar(fs, clock, carpeta="D:/casos/uno", intervalo=3.0)
+
+    assert resultado.status == "ok"
+    assert sorted(resultado.outputs["archivos_movidos"]) == [
+        f"{WATCH}/uno-gum.stl", f"{WATCH}/uno-tooth.stl", f"{WATCH}/uno.pts",
+    ]
+    assert "D:/casos/uno/sub/otro.stl" in fs.files  # las subcarpetas no se tocan
+
+
+def test_toothcam_enviar_con_carpeta_vacia_o_inexistente_es_err():
+    vacia, _, _ = _toothcam_enviar(FakeFs(dirs=(WATCH, RESULT, "D:/casos/uno")), carpeta="D:/casos/uno")
+    inexistente, _, _ = _toothcam_enviar(FakeFs(dirs=(WATCH, RESULT)), carpeta="D:/casos/no-existe")
+
+    assert vacia.status == "err" and "D:/casos/uno" in vacia.message
+    assert inexistente.status == "err" and "D:/casos/no-existe" in inexistente.message
+
+
+def test_toothcam_enviar_con_carpeta_y_archivos_a_la_vez_es_err():
+    fs = FakeFs(files={"D:/casos/uno/uno-gum.stl": "g"}, dirs=(WATCH, RESULT, "D:/casos/uno"))
+
+    resultado, fs, _ = _toothcam_enviar(fs, carpeta="D:/casos/uno", archivos=["D:/casos/uno/uno-gum.stl"])
+
+    assert resultado.status == "err"
+    assert "D:/casos/uno/uno-gum.stl" in fs.files
+
+
+def test_toothcam_enviar_con_la_carpeta_vigilada_como_origen_es_err():
+    fs = FakeFs(files={f"{WATCH}/uno-gum.stl": "g"}, dirs=(WATCH, RESULT))
+
+    resultado, _, _ = _toothcam_enviar(fs, carpeta="D:\toothcam_watch\\")
+
+    assert resultado.status == "err"

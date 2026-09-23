@@ -693,7 +693,7 @@ TOOTHCAM_ENVIAR = ToolManifest(
     label="ToothCAM: enviar y esperar",
     category="TOOTHCAM",
     doc=(
-        "Mueve 'archivos' a 'carpeta_watch' -la carpeta que ToothCAM ya tiene "
+        "Mueve 'archivos' -o todo lo que haya en 'carpeta'- a 'carpeta_watch' -la carpeta que ToothCAM ya tiene "
         "vigilada con 'Watch directory' + 'Scan dir.' + 'Compute' activados a "
         "mano en la app- y espera a que aparezca un .log nuevo en "
         "'carpeta_salida', reintentando cada 'intervalo' segundos hasta "
@@ -704,29 +704,59 @@ TOOTHCAM_ENVIAR = ToolManifest(
         "carpeta vigilada dejaría a ToothCAM procesando un set incompleto."
     ),
     params=(
-        Param("archivos", ParamType.JSON, required=True, doc="Rutas de los STL/PTS del caso (todos los que ToothCAM necesite juntos: gum, tooth, att, etc.)."),
+        Param(
+            "carpeta", ParamType.PATH, default="",
+            doc="Carpeta con los archivos del caso: se mueven TODOS los que haya adentro (no las "
+            "subcarpetas), sin filtrar por extensión, porque ToothCAM necesita el set entero. "
+            "Alternativa a 'archivos', para cuando lo que llega de un nodo anterior es una ruta y no una lista.",
+        ),
+        Param(
+            "archivos", ParamType.JSON, default=[],
+            doc="Alternativa a 'carpeta': rutas de los STL/PTS del caso (todos los que ToothCAM "
+            "necesite juntos: gum, tooth, att, etc.).",
+        ),
         Param("carpeta_watch", ParamType.PATH, required=True, doc="La carpeta que ToothCAM tiene asignada en 'Watch directory'."),
         Param("carpeta_salida", ParamType.PATH, required=True, doc="Donde ToothCAM deja el/los log (normalmente 'batch_result' dentro de la carpeta vigilada)."),
         Param("intervalo", ParamType.FLOAT, default=5.0, doc="Segundos entre cada chequeo de si ya apareció el log."),
         Param("timeout", ParamType.FLOAT, default=900.0, doc="Segundos máximos totales de espera antes de darse por vencido."),
     ),
     outputs=_SALIDAS_LOG + (
-        Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch', en el mismo orden que 'archivos'."),
+        Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch', en el mismo orden que 'archivos' (o que el listado de 'carpeta')."),
     ),
 )
+
+
+def _misma_carpeta(a: str, b: str) -> bool:
+    def normal(ruta: str) -> str:
+        return ruta.replace("\\", "/").rstrip("/").lower()
+    return normal(a) == normal(b)
 
 
 def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
     fs = ctx.port(port_names.FS)
     clock = ctx.port(port_names.CLOCK)
-    archivos = ctx.params["archivos"]
-    if not archivos:
-        return ToolResult.err("'archivos' vacío: no hay nada para enviar a ToothCAM")
+    carpeta = ctx.params.get("carpeta") or ""
+    archivos = ctx.params.get("archivos") or []
+    if carpeta and archivos:
+        return ToolResult.err("hace falta 'carpeta' o 'archivos', no las dos")
+    if not carpeta and not archivos:
+        return ToolResult.err("hace falta 'carpeta' o 'archivos': no hay nada para enviar a ToothCAM")
 
     carpeta_watch = ctx.params["carpeta_watch"]
     carpeta_salida = ctx.params["carpeta_salida"]
     if not fs.exists(carpeta_watch) or not fs.is_dir(carpeta_watch):
         return ToolResult.err(f"no existe la carpeta vigilada por ToothCAM: {carpeta_watch}")
+    if carpeta:
+        if _misma_carpeta(carpeta, carpeta_watch):
+            return ToolResult.err(f"'carpeta' es la misma carpeta vigilada por ToothCAM: {carpeta}")
+        if not fs.exists(carpeta) or not fs.is_dir(carpeta):
+            return ToolResult.err(f"no existe la carpeta con los archivos del caso: {carpeta}")
+        try:
+            archivos = sorted(e.path for e in fs.list_dir(carpeta) if not e.is_dir)
+        except PortError as exc:
+            return ToolResult.err(f"no se pudo listar {carpeta}: {exc}")
+        if not archivos:
+            return ToolResult.err(f"no hay ningún archivo en {carpeta}: nada para enviar a ToothCAM")
     faltantes = [a for a in archivos if not fs.exists(a)]
     if faltantes:
         return ToolResult.err(f"no existen estos archivos, no se movió nada: {', '.join(faltantes)}")
