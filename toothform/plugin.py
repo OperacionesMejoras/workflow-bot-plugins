@@ -60,13 +60,11 @@ que aparezca un log. Un tool que sólo mueve no alcanza: el flujo necesita
 saber si terminó bien o mal antes de seguir, así que este tool mueve **y**
 espera, bloqueando con `clock.sleep` en vez de devolver `loop` para que el
 flujo lo reintente — es una sola espera acotada (`timeout`), no un polling
-externo que valga la pena modelar como arista. No se conoce todavía el
-formato real del log de ToothCAM (no hay licencia para probarlo), así que
-reusa `_interpretar_log` -la misma lógica de `check_log`, con el mismo
-fallback por palabras clave "success"/"fail"/"error" si no matchea el patrón
-de totales de ToothFORM- como aproximación razonable hasta tener una muestra
-real. Corregir el parseo cuando aparezca una es cambiar un regex acá, no
-tocar el flujo.
+externo que valga la pena modelar como arista. El log de ToothCAM (visto
+en producción con BY275) va sumando una línea por dato mientras procesa
+—`1\\3    <dato>    <fecha>    success`—, así que el tool no termina con el
+primer log que ve sino cuando tiene todas las líneas. Un log con otro
+formato se lee con `_interpretar_log`, como el de ToothFORM.
 
 El otro camino (elegir Lip Flat/Tongue Flat por corrida y abrir un archivo
 puntual) necesita clickear la ventana de la app, no sólo mover un archivo:
@@ -697,9 +695,10 @@ TOOTHCAM_ENVIAR = ToolManifest(
         "vigilada con 'Watch directory' + 'Scan dir.' + 'Compute' activados a "
         "mano en la app- y espera a que aparezca un .log nuevo en "
         "'carpeta_salida', reintentando cada 'intervalo' segundos hasta "
-        "'timeout'. Interpreta el log con el mismo criterio que "
-        "'verificar log' de ToothFORM (no se conoce todavía el formato real "
-        "del log de ToothCAM). Todo o nada: si falta un archivo no mueve "
+        "'timeout'. El log lo va escribiendo a medida que procesa "
+        "(\"1\\3    <dato>    <fecha>    success\"), así que espera hasta que "
+        "estén todas las líneas: ok si todas dicen success, err si alguna no. "
+        "Un log con otro formato se lee como el de ToothFORM. Todo o nada: si falta un archivo no mueve "
         "nada y corta antes de esperar -mover la mitad de un caso a la "
         "carpeta vigilada dejaría a ToothCAM procesando un set incompleto."
     ),
@@ -738,6 +737,36 @@ TOOTHCAM_ENVIAR = ToolManifest(
         Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch' (movidos o copiados), en el mismo orden que 'archivos' (o que el listado de 'carpeta')."),
     ),
 )
+
+
+# El log de ToothCAM, visto en producción (BY275, 23/09/2026): una línea por
+# dato a medida que los procesa, "<n>\<total>    <dato>    <fecha>    <estado>",
+# ej. "1\\3    BY275-L06-A    2026-09-23-15-32-13    success". Aparece con la
+# primera línea, así que hasta que no están las <total> no terminó.
+_PATRON_TOOTHCAM = re.compile(r"^\s*(\d+)\s*[\\/]\s*(\d+)\s+(\S+)\s+\S+\s+(\S+)\s*$", re.M)
+
+
+def _progreso_toothcam(texto: str) -> tuple[int, list[tuple[str, str]]] | None:
+    """(total, [(dato, estado), ...]) del log de ToothCAM, o None si no tiene ese formato."""
+    lineas = _PATRON_TOOTHCAM.findall(texto)
+    if not lineas:
+        return None
+    total = max(int(t) for _n, t, _d, _e in lineas)
+    return total, [(dato, estado) for _n, _t, dato, estado in lineas]
+
+
+def _resultado_toothcam(ctx: ToolContext, nombre: str, texto: str, total: int, datos: list, **extra) -> ToolResult:
+    fallidos = [dato for dato, estado in datos if estado.lower() != "success"]
+    exitosos = len(datos) - len(fallidos)
+    ultima = next((l.strip() for l in reversed(texto.splitlines()) if l.strip()), "")
+    ctx.log(f"{nombre}: {len(datos)} de {total} procesados, {len(fallidos)} con falla")
+    comunes = dict(
+        log_file=nombre, checkLogResult={"log_file": nombre, "message": ultima}, log_texto=texto,
+        exitosos=exitosos, fallidos=len(fallidos), **extra,
+    )
+    if fallidos:
+        return ToolResult.err(f"{len(fallidos)} de {total} fallaron: {', '.join(fallidos)}", **comunes)
+    return ToolResult.ok(**comunes)
 
 
 def _logs_si_hay(fs, carpeta: str) -> list:
@@ -789,7 +818,7 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
     if faltantes:
         return ToolResult.err(f"no existen estos archivos, no se movió nada: {', '.join(faltantes)}")
 
-    previos = {e.name for e in _logs_si_hay(fs, carpeta_salida)}
+    previos = {e.name: e.modified_at for e in _logs_si_hay(fs, carpeta_salida)}
     if crear_watch:
         fs.make_dirs(carpeta_watch)
         ctx.log(f"creada {carpeta_watch} para el caso")
@@ -808,15 +837,38 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
         log_file="", checkLogResult={"log_file": "", "message": ""}, exitosos=0, fallidos=0,
         log_texto="", archivos_movidos=movidos,
     )
+    visto = -1  # cuántas líneas del log ya se anotaron, para no repetir el progreso
     while True:
-        nuevos = [e for e in _logs_si_hay(fs, carpeta_salida) if e.name not in previos]
+        # Nuevo es el que no estaba o el que cambió: ToothCAM le pone al log
+        # el nombre del caso, así que en una segunda corrida es el mismo archivo.
+        nuevos = [e for e in _logs_si_hay(fs, carpeta_salida) if previos.get(e.name) != e.modified_at]
         if nuevos:
             reciente = max(nuevos, key=lambda e: e.modified_at)
             texto = fs.read_text(reciente.path, encoding="utf-8")
-            return _interpretar_log(ctx, reciente.name, texto, archivos_movidos=movidos)
+            progreso = _progreso_toothcam(texto)
+            if progreso is None:
+                # No es el formato conocido: se lee como antes, de una.
+                return _interpretar_log(ctx, reciente.name, texto, archivos_movidos=movidos)
+            total, datos = progreso
+            if len(datos) >= total:
+                return _resultado_toothcam(ctx, reciente.name, texto, total, datos, archivos_movidos=movidos)
+            if len(datos) != visto:
+                visto = len(datos)
+                ctx.log(f"ToothCAM va {len(datos)} de {total} ({datos[-1][0]}: {datos[-1][1]})")
+            sin_log = dict(
+                sin_log, log_file=reciente.name, log_texto=texto,
+                checkLogResult={"log_file": reciente.name, "message": f"{len(datos)} de {total}"},
+                exitosos=sum(1 for _d, e in datos if e.lower() == "success"),
+                fallidos=sum(1 for _d, e in datos if e.lower() != "success"),
+            )
         if ctx.cancelled:
             return ToolResult.err("cancelado mientras esperaba el log de ToothCAM", **sin_log)
         if clock.monotonic() >= limite:
+            if sin_log["log_file"]:
+                return ToolResult.err(
+                    f"ToothCAM no terminó en {timeout:g} s: el log va "
+                    f"{sin_log['checkLogResult']['message']}", **sin_log,
+                )
             return ToolResult.err(
                 f"no apareció un log nuevo de ToothCAM en {timeout:g} s en {carpeta_salida}", **sin_log,
             )

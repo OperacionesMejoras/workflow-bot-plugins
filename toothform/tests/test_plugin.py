@@ -933,3 +933,65 @@ def test_toothcam_enviar_con_copiar_deja_los_originales_donde_estaban():
     assert resultado.status == "ok"
     assert sorted(resultado.outputs["archivos_movidos"]) == [f"{WATCH}/uno-gum.stl", f"{WATCH}/uno.pts"]
     assert "D:/casos/uno/uno-gum.stl" in fs.files and f"{WATCH}/uno-gum.stl" in fs.files
+
+
+class FsLogQueCrece(FakeFs):
+    """El log de ToothCAM: cada 'cada' segundos se le suma una línea, como lo va escribiendo la app."""
+
+    def __init__(self, clock, ruta: str, lineas: list[str], cada: float, **kw) -> None:
+        super().__init__(**kw)
+        self.clock, self.ruta, self.lineas, self.cada = clock, ruta, lineas, cada
+
+    def _actual(self) -> int:
+        return min(len(self.lineas), int(self.clock.monotonic() // self.cada))
+
+    def list_dir(self, path):
+        if self._actual() == 0:  # ToothCAM todavía no arrancó: no hay log
+            self.files.pop(self.ruta, None)
+            return super().list_dir(path)
+        self.files[self.ruta] = "\n".join(self.lineas[: self._actual()]) + "\n"
+        return [replace(e, modified_at=float(self._actual())) if e.path == self.ruta else e for e in super().list_dir(path)]
+
+
+LOG_TOOTHCAM = [
+    r"1\3    BY275-L06-A    2026-09-23-15-32-13    success",
+    r"2\3    BY275-L07-A    2026-09-23-15-32-40    success",
+    r"3\3    BY275-U06-A    2026-09-23-15-33-05    success",
+]
+
+
+def test_toothcam_enviar_no_termina_con_el_log_a_medias_espera_todas_las_lineas():
+    clock = FakeClock()
+    fs = FsLogQueCrece(
+        clock, f"{RESULT}/BY275.log", LOG_TOOTHCAM, cada=20.0,
+        files={"D:/casos/uno-gum.stl": "g"}, dirs=(WATCH, RESULT),
+    )
+
+    resultado, _, clock = _toothcam_enviar(fs, clock, archivos=["D:/casos/uno-gum.stl"], intervalo=5.0, timeout=300.0)
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["exitosos"] == 3 and resultado.outputs["fallidos"] == 0
+    assert clock.total_slept >= 60.0  # esperó hasta la tercera línea
+
+
+def test_toothcam_enviar_con_un_dato_que_falla_es_err_y_lo_nombra():
+    clock = FakeClock()
+    lineas = LOG_TOOTHCAM[:2] + [r"3\3    BY275-U06-A    2026-09-23-15-33-05    fail"]
+    fs = FsLogQueCrece(clock, f"{RESULT}/BY275.log", lineas, cada=1.0, files={"D:/casos/uno-gum.stl": "g"}, dirs=(WATCH, RESULT))
+
+    resultado, _, _ = _toothcam_enviar(fs, clock, archivos=["D:/casos/uno-gum.stl"], intervalo=1.0, timeout=60.0)
+
+    assert resultado.status == "err"
+    assert "BY275-U06-A" in resultado.message
+    assert resultado.outputs["exitosos"] == 2 and resultado.outputs["fallidos"] == 1
+
+
+def test_toothcam_enviar_timeout_con_el_log_a_medias_dice_hasta_donde_llego():
+    clock = FakeClock()
+    fs = FsLogQueCrece(clock, f"{RESULT}/BY275.log", LOG_TOOTHCAM, cada=10.0, files={"D:/casos/uno-gum.stl": "g"}, dirs=(WATCH, RESULT))
+
+    resultado, _, _ = _toothcam_enviar(fs, clock, archivos=["D:/casos/uno-gum.stl"], intervalo=5.0, timeout=15.0)
+
+    assert resultado.status == "err"
+    assert "1 de 3" in resultado.message
+    assert resultado.outputs["log_file"] == "BY275.log"
