@@ -796,9 +796,76 @@ def test_toothcam_enviar_no_mueve_nada_si_falta_un_archivo():
 
 
 def test_toothcam_enviar_carpeta_watch_inexistente_es_err():
-    resultado, _, _ = _toothcam_enviar(FakeFs(dirs=(RESULT,)), archivos=["D:/casos/uno-gum.stl"])
+    fs = FakeFs(files={"D:/casos/uno-gum.stl": "g"}, dirs=(RESULT,))
+
+    resultado, fs, _ = _toothcam_enviar(fs, carpeta_watch="D:/no-existe/watch", archivos=["D:/casos/uno-gum.stl"])
 
     assert resultado.status == "err"
+    assert "D:/casos/uno-gum.stl" in fs.files
+
+
+def test_toothcam_enviar_crea_la_subcarpeta_del_caso_adentro_de_la_vigilada():
+    clock = FakeClock()
+    fs = FsLogDemorado(
+        clock, "20260101.log", aparece_en=3.0,
+        files={"D:/casos/uno-gum.stl": "g", f"{RESULT}/20260101.log": LOG_OK},
+        dirs=(WATCH, RESULT),
+    )
+
+    resultado, fs, _ = _toothcam_enviar(
+        fs, clock, carpeta_watch=f"{WATCH}/BY275", archivos=["D:/casos/uno-gum.stl"], intervalo=3.0,
+    )
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["archivos_movidos"] == [f"{WATCH}/BY275/uno-gum.stl"]
+
+
+def test_toothcam_enviar_no_crea_la_subcarpeta_si_falta_un_archivo():
+    fs = FakeFs(dirs=(WATCH, RESULT))
+
+    resultado, fs, _ = _toothcam_enviar(fs, carpeta_watch=f"{WATCH}/BY275", archivos=["D:/casos/no-existe.stl"])
+
+    assert resultado.status == "err"
+    assert f"{WATCH}/BY275" not in fs.dirs
+
+
+class FsSalidaDemorada(FakeFs):
+    """ToothCAM crea 'carpeta' con su log adentro recién cuando el reloj llega a 'aparece_en'."""
+
+    def __init__(self, clock, carpeta: str, aparece_en: float, **kw) -> None:
+        super().__init__(**kw)
+        self.clock, self.carpeta, self.aparece_en = clock, carpeta, aparece_en
+
+    def _todavia_no(self, path) -> bool:
+        p = path.replace("\\", "/").rstrip("/")
+        return self.clock.monotonic() < self.aparece_en and (p == self.carpeta or p.startswith(self.carpeta + "/"))
+
+    def exists(self, path):
+        return False if self._todavia_no(path) else super().exists(path)
+
+    def list_dir(self, path):
+        if self._todavia_no(path):
+            raise PortError(f"no existe: {path}")
+        return super().list_dir(path)
+
+
+def test_toothcam_enviar_espera_a_que_toothcam_cree_la_carpeta_de_salida_del_caso():
+    clock = FakeClock()
+    salida = "D:/toothcam_out/BY275"
+    fs = FsSalidaDemorada(
+        clock, salida, aparece_en=10.0,
+        files={"D:/casos/uno-gum.stl": "g", f"{salida}/20260101.log": LOG_OK},
+        dirs=(WATCH, "D:/toothcam_out", salida),
+    )
+
+    resultado, fs, clock = _toothcam_enviar(
+        fs, clock, carpeta_salida=salida, archivos=["D:/casos/uno-gum.stl"], intervalo=3.0, timeout=60.0,
+    )
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["log_file"] == "20260101.log"
+    assert clock.total_slept >= 10.0
+    assert ("make_dirs", salida) not in [c[:2] for c in fs.calls]  # la crea ToothCAM, no nosotros
 
 
 def test_toothcam_enviar_archivos_vacio_es_err():

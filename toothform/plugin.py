@@ -719,8 +719,18 @@ TOOTHCAM_ENVIAR = ToolManifest(
             "copiar", ParamType.BOOL, default=False,
             doc="Copiar en vez de mover: los originales quedan donde estaban. Sin tildar, los mueve.",
         ),
-        Param("carpeta_watch", ParamType.PATH, required=True, doc="La carpeta que ToothCAM tiene asignada en 'Watch directory'."),
-        Param("carpeta_salida", ParamType.PATH, required=True, doc="Donde ToothCAM deja el/los log (normalmente 'batch_result' dentro de la carpeta vigilada)."),
+        Param(
+            "carpeta_watch", ParamType.PATH, required=True,
+            doc="La carpeta que ToothCAM tiene asignada en 'Watch directory', o una subcarpeta del "
+            "caso adentro de ella (ej. ...\\T1-C-INPUT\\{id_externo}): si no existe pero la de "
+            "arriba sí, la crea antes de mandar los archivos.",
+        ),
+        Param(
+            "carpeta_salida", ParamType.PATH, required=True,
+            doc="Donde aparece el log de ToothCAM. Puede ser la carpeta que ToothCAM crea sola para el "
+            "caso (ej. ...\\OUTPUT\\{id_externo}): si todavía no existe, espera a que aparezca en vez "
+            "de crearla, para no adelantársele a la app.",
+        ),
         Param("intervalo", ParamType.FLOAT, default=5.0, doc="Segundos entre cada chequeo de si ya apareció el log."),
         Param("timeout", ParamType.FLOAT, default=900.0, doc="Segundos máximos totales de espera antes de darse por vencido."),
     ),
@@ -728,6 +738,13 @@ TOOTHCAM_ENVIAR = ToolManifest(
         Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch' (movidos o copiados), en el mismo orden que 'archivos' (o que el listado de 'carpeta')."),
     ),
 )
+
+
+def _logs_si_hay(fs, carpeta: str) -> list:
+    """Los .log de 'carpeta', o ninguno si ToothCAM todavía no la creó."""
+    if not fs.exists(carpeta):
+        return []
+    return _logs(fs, carpeta)
 
 
 def _misma_carpeta(a: str, b: str) -> bool:
@@ -748,8 +765,15 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
 
     carpeta_watch = ctx.params["carpeta_watch"]
     carpeta_salida = ctx.params["carpeta_salida"]
-    if not fs.exists(carpeta_watch) or not fs.is_dir(carpeta_watch):
-        return ToolResult.err(f"no existe la carpeta vigilada por ToothCAM: {carpeta_watch}")
+    crear_watch = not fs.exists(carpeta_watch)
+    arriba = fs.parent(carpeta_watch)
+    if crear_watch and not (fs.exists(arriba) and fs.is_dir(arriba)):
+        return ToolResult.err(
+            f"no existe la carpeta vigilada por ToothCAM: {carpeta_watch} (ni {arriba}, "
+            "que es donde se la crearía)"
+        )
+    if not crear_watch and not fs.is_dir(carpeta_watch):
+        return ToolResult.err(f"la carpeta vigilada por ToothCAM no es una carpeta: {carpeta_watch}")
     if carpeta:
         if _misma_carpeta(carpeta, carpeta_watch):
             return ToolResult.err(f"'carpeta' es la misma carpeta vigilada por ToothCAM: {carpeta}")
@@ -765,8 +789,10 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
     if faltantes:
         return ToolResult.err(f"no existen estos archivos, no se movió nada: {', '.join(faltantes)}")
 
-    fs.make_dirs(carpeta_salida)
-    previos = {e.name for e in _logs(fs, carpeta_salida)}
+    previos = {e.name for e in _logs_si_hay(fs, carpeta_salida)}
+    if crear_watch:
+        fs.make_dirs(carpeta_watch)
+        ctx.log(f"creada {carpeta_watch} para el caso")
 
     copiar = bool(ctx.params.get("copiar"))
     enviar = fs.copy_file if copiar else fs.move
@@ -783,7 +809,7 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
         log_texto="", archivos_movidos=movidos,
     )
     while True:
-        nuevos = [e for e in _logs(fs, carpeta_salida) if e.name not in previos]
+        nuevos = [e for e in _logs_si_hay(fs, carpeta_salida) if e.name not in previos]
         if nuevos:
             reciente = max(nuevos, key=lambda e: e.modified_at)
             texto = fs.read_text(reciente.path, encoding="utf-8")
