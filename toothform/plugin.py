@@ -109,7 +109,7 @@ MAX_SIMULTANEOS = "toothformMaxSimultaneos"
 MANIFEST = PluginManifest(
     name="toothform",
     label="ToothFORM",
-    version="0.5.1",
+    version="0.6.0",
     doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana—, leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
     ports=(port_names.PROCESS, port_names.FS, port_names.CLOCK, port_names.WINDOW),
     settings=(
@@ -751,7 +751,8 @@ TOOTHCAM_ENVIAR = ToolManifest(
             "'carpeta_salida' (ej. el de los STL de entrada con .txt en vez de .stl). Con "
             "'esperados': cuando el log está completo, cada modelo con success tiene que tener "
             "su archivo (uno cuyo nombre empiece con el del modelo); si falta alguno, espera un "
-            "poco por si se está escribiendo y después es err nombrándolo. Se busca en "
+            "poco por si se está escribiendo y después da ok con un warning que las nombra "
+            "('curvas_completas' = no). Se busca en "
             "subcarpetas también y sin distinguir mayúsculas.",
         ),
     ),
@@ -760,6 +761,11 @@ TOOTHCAM_ENVIAR = ToolManifest(
         Output(
             "sin_salida", ParamType.JSON,
             doc="Con 'patron_salida': los modelos que el log da por success pero no dejaron su archivo.",
+        ),
+        Output(
+            "curvas_completas", ParamType.STR,
+            doc="'si' o 'no': con 'no' el tool igual da ok —las curvas que están sirven— pero avisa "
+            "con un warning cuáles faltan, para hacerlas a mano. Para ramificar el flujo por eso.",
         ),
     ),
 )
@@ -808,10 +814,13 @@ def _resultado_toothcam(
             f"ToothCAM terminó con {len(datos)} procesados y se esperaban {esperados}", **comunes,
         )
     if sin_salida:
-        return ToolResult.err(
-            f"el log da success pero no dejaron su archivo de salida: {', '.join(sin_salida)}", **comunes,
-        )
-    return ToolResult.ok(**comunes)
+        # Warning y no err: el resto de las curvas sirve y se usa; el aviso es
+        # para mandar a hacer a mano las que faltan (BY275-L04-A, 23/09/2026).
+        # 'curvas_completas' deja que el flujo lo ramifique si hace falta.
+        aviso = f"ToothCAM terminó pero faltan curvas TXT: {', '.join(sin_salida)}"
+        ctx.log(aviso, "warning")
+        return ToolResult.ok(aviso, curvas_completas="no", **comunes)
+    return ToolResult.ok(curvas_completas="si", **comunes)
 
 
 def _completo_sin_fin(texto: str) -> bool:
@@ -922,7 +931,7 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
     limite = clock.monotonic() + timeout
     sin_log = dict(
         log_file="", checkLogResult={"log_file": "", "message": ""}, exitosos=0, fallidos=0,
-        log_texto="", archivos_movidos=movidos, sin_salida=[],
+        log_texto="", archivos_movidos=movidos, sin_salida=[], curvas_completas="no",
     )
     visto = None  # el último progreso anotado, para no repetirlo
     completo_en = None  # cuándo el log llegó a 'esperados', para la gracia de las salidas

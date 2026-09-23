@@ -1114,16 +1114,33 @@ def test_toothcam_enviar_sin_esperados_corta_en_la_primera_linea_n_de_n():
     assert resultado.outputs["exitosos"] == 1
 
 
-def test_toothcam_enviar_un_success_sin_su_txt_es_err_al_rato_no_al_timeout():
+def test_toothcam_enviar_un_success_sin_su_txt_es_ok_con_warning_al_rato_no_al_timeout():
     # BY275, 23/09/2026: 36 success en el log y 35 .txt; faltaba el de L04-A y
-    # el nodo esperaba el 36 hasta el timeout.
+    # el nodo esperaba el 36 hasta el timeout. Las demás curvas sirven: ok, con
+    # un warning que dice cuál hay que hacer a mano.
     clock = FakeClock()
+    logs: list = []
     fs = _toothcam_fs(clock, LOG_BY275, sin_txt=("BY275-L06-A",))
+    reg = _registry(fs=fs, clock=clock)
+    params = {
+        "carpeta_watch": WATCH, "carpeta_salida": SALIDA_CASO, "archivos": ["D:/casos/uno-gum.stl"],
+        "intervalo": 5.0, "timeout": 900.0, "esperados": 12, "patron_salida": PATRON_TXT,
+    }
 
-    resultado, _, clock = _toothcam_con(fs, clock, esperados=12, patron_salida=PATRON_TXT, timeout=900.0)
+    resultado = reg.execute("toothform.toothcam_enviar", _ctx_factory(params, logs=logs))
 
-    assert resultado.status == "err"
-    assert "BY275-L06-A" in resultado.message
+    assert resultado.status == "ok"
+    assert resultado.outputs["curvas_completas"] == "no"
     assert resultado.outputs["sin_salida"] == ["BY275-L06-A"]
-    assert resultado.outputs["exitosos"] == 12
+    assert "faltan curvas TXT: BY275-L06-A" in resultado.message
+    assert any("faltan curvas TXT" in m for m in logs)
     assert clock.monotonic() < 10.0 * len(LOG_BY275) + 60.0  # la gracia, no los 900 s
+
+
+def test_toothcam_enviar_con_todas_las_curvas_dice_completas():
+    clock = FakeClock()
+
+    resultado, _, _ = _toothcam_con(_toothcam_fs(clock, LOG_BY275), clock, esperados=12, patron_salida=PATRON_TXT)
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["curvas_completas"] == "si"
