@@ -107,7 +107,6 @@ from backend.core.ports import PortError
 
 TIMEOUT = "botsTimeout"
 MI_DIRECCION = "botsMiDireccion"
-MI_NOMBRE = "botsMiNombre"
 PREFIJO_API = "/api/core"
 _URL_VALIDA = re.compile(r"^https?://[^\s/]+(:\d+)?$")
 
@@ -236,12 +235,6 @@ MANIFEST = PluginManifest(
             "bandeja en 'Copiar dirección para otras PCs' —ésa es para que otros Bots lleguen acá, y "
             "migrar sólo se puede pedir desde la propia máquina— ni el puerto de otra instalación de "
             "esta misma PC, que sería comparar y migrar el contenido de otro Bot.",
-        ),
-        Setting(
-            MI_NOMBRE, ParamType.STR, label="Nombre de este Bot",
-            doc="Cómo se llama ESTE Bot, ej. 'Impresión 2'. La app lo pone en el título de la pestaña "
-            "del navegador, para distinguir varios Bots abiertos a la vez. Conviene que sea el mismo "
-            "nombre con que lo dieron de alta los otros Bots en 'Bots conocidos'.",
         ),
     ),
     resources=(BOTS,),
@@ -1262,9 +1255,9 @@ def _abrir(ctx: ToolContext) -> ToolResult:
     pestaña de uno caído también sirve —el navegador dice qué pasa—. Sí valida
     la dirección, para no abrir una pestaña con `ftp://` o con una ruta.
 
-    `?bot=<nombre>` lleva el nombre con que ESTE Bot lo conoce, para que la
-    pestaña que se abre se titule así aunque el otro todavía no tenga
-    configurado su propio nombre (`botsMiNombre`).
+    `?bot=<nombre>` lleva el nombre con que ESTE Bot lo conoce: la app del
+    otro titula su pestaña con su propia identidad (`/api/core/identidad`) y,
+    si todavía no se puso nombre, con este alias.
     """
     bot = _bot(ctx, ctx.params["nombre"])
     if isinstance(bot, ToolResult):
