@@ -109,7 +109,7 @@ MAX_SIMULTANEOS = "toothformMaxSimultaneos"
 MANIFEST = PluginManifest(
     name="toothform",
     label="ToothFORM",
-    version="0.5.0",
+    version="0.5.1",
     doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana—, leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
     ports=(port_names.PROCESS, port_names.FS, port_names.CLOCK, port_names.WINDOW),
     settings=(
@@ -749,12 +749,18 @@ TOOTHCAM_ENVIAR = ToolManifest(
             "patron_salida", default="",
             doc="Regex opcional de los archivos que ToothCAM deja por cada modelo en "
             "'carpeta_salida' (ej. el de los STL de entrada con .txt en vez de .stl). Con "
-            "'esperados', además del log espera a que estén todos esos archivos. Se busca en "
+            "'esperados': cuando el log está completo, cada modelo con success tiene que tener "
+            "su archivo (uno cuyo nombre empiece con el del modelo); si falta alguno, espera un "
+            "poco por si se está escribiendo y después es err nombrándolo. Se busca en "
             "subcarpetas también y sin distinguir mayúsculas.",
         ),
     ),
     outputs=_SALIDAS_LOG + (
         Output("archivos_movidos", ParamType.JSON, doc="Rutas finales dentro de 'carpeta_watch' (movidos o copiados), en el mismo orden que 'archivos' (o que el listado de 'carpeta')."),
+        Output(
+            "sin_salida", ParamType.JSON,
+            doc="Con 'patron_salida': los modelos que el log da por success pero no dejaron su archivo.",
+        ),
     ),
 )
 
@@ -785,19 +791,25 @@ def _fallidos(datos: list) -> list[str]:
     return [dato for dato, estado in datos if estado.lower() != "success"]
 
 
-def _resultado_toothcam(ctx: ToolContext, nombre: str, texto: str, datos: list, esperados: int, **extra) -> ToolResult:
+def _resultado_toothcam(
+    ctx: ToolContext, nombre: str, texto: str, datos: list, esperados: int, sin_salida: list | None = None, **extra,
+) -> ToolResult:
     fallidos = _fallidos(datos)
     ultima = next((l.strip() for l in reversed(texto.splitlines()) if l.strip()), "")
     ctx.log(f"{nombre}: {len(datos)} procesados, {len(fallidos)} con falla")
     comunes = dict(
         log_file=nombre, checkLogResult={"log_file": nombre, "message": ultima}, log_texto=texto,
-        exitosos=len(datos) - len(fallidos), fallidos=len(fallidos), **extra,
+        exitosos=len(datos) - len(fallidos), fallidos=len(fallidos), sin_salida=sin_salida or [], **extra,
     )
     if fallidos:
         return ToolResult.err(f"{len(fallidos)} de {len(datos)} fallaron: {', '.join(fallidos)}", **comunes)
     if esperados and len(datos) != esperados:
         return ToolResult.err(
             f"ToothCAM terminó con {len(datos)} procesados y se esperaban {esperados}", **comunes,
+        )
+    if sin_salida:
+        return ToolResult.err(
+            f"el log da success pero no dejaron su archivo de salida: {', '.join(sin_salida)}", **comunes,
         )
     return ToolResult.ok(**comunes)
 
@@ -810,6 +822,22 @@ def _completo_sin_fin(texto: str) -> bool:
 
 def _es_finish(nombre: str) -> bool:
     return nombre.lower().rsplit(".", 1)[0] == "finish"
+
+
+def _sin_salida(datos: list, salidas: list[str]) -> list[str]:
+    """Los modelos con success en el log que no tienen un archivo de salida con su nombre."""
+    nombres = [ruta.replace("\\", "/").rsplit("/", 1)[-1].lower() for ruta in salidas]
+    return [
+        dato for dato, estado in datos
+        if estado.lower() == "success" and not any(n.startswith(dato.lower()) for n in nombres)
+    ]
+
+
+# Cuánto más se espera, con el log ya completo, a que aparezcan las salidas
+# que faltan. En BY275 los .txt estaban antes que el log, así que una que
+# falta a esa altura casi seguro no viene: es para no cortar por un archivo
+# que se está copiando, no para esperar de verdad.
+_GRACIA_SALIDAS = 30.0
 
 
 def _salidas(fs, carpeta: str, patron) -> list[str]:
@@ -894,9 +922,10 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
     limite = clock.monotonic() + timeout
     sin_log = dict(
         log_file="", checkLogResult={"log_file": "", "message": ""}, exitosos=0, fallidos=0,
-        log_texto="", archivos_movidos=movidos,
+        log_texto="", archivos_movidos=movidos, sin_salida=[],
     )
     visto = None  # el último progreso anotado, para no repetirlo
+    completo_en = None  # cuándo el log llegó a 'esperados', para la gracia de las salidas
     while True:
         # Nuevo es el que no estaba o el que cambió: ToothCAM le pone al log
         # el nombre del caso, así que en una segunda corrida es el mismo archivo.
@@ -912,10 +941,16 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
         if de_toothcam:
             reciente, texto, datos = de_toothcam[0]
             fallidos = _fallidos(datos)
+            faltan = _sin_salida(datos, salidas) if patron_salida is not None else []
             if esperados:
-                # Un modelo que falla no deja salida: se cuentan sólo los que anduvieron.
-                termino = len(datos) >= esperados and (
-                    patron_salida is None or len(salidas) >= len(datos) - len(fallidos)
+                # El log completo es el fin. Si falta alguna salida se le da
+                # una gracia corta y después se informa, en vez de esperar
+                # hasta el timeout por un archivo que no va a venir (BY275-L04-A).
+                completo = len(datos) >= esperados
+                if completo and completo_en is None:
+                    completo_en = clock.monotonic()
+                termino = completo and (
+                    not faltan or clock.monotonic() - completo_en >= max(_GRACIA_SALIDAS, 3 * intervalo)
                 )
             else:
                 termino = _completo_sin_fin(texto)
@@ -924,11 +959,12 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
                     ctx.log(
                         f"ToothCAM terminó: {len(datos)} de {esperados} en {reciente.name} y "
                         f"{len(salidas)} archivo(s) de salida"
+                        + (f"; sin salida: {', '.join(faltan)}" if faltan else "")
                     )
                 elif esperados:
                     ctx.log(f"ToothCAM terminó: {len(datos)} de {esperados} en {reciente.name}")
                 return _resultado_toothcam(
-                    ctx, reciente.name, texto, datos, esperados, archivos_movidos=movidos,
+                    ctx, reciente.name, texto, datos, esperados, sin_salida=faltan, archivos_movidos=movidos,
                 )
             cuantos = f"{len(datos)} de {esperados}" if esperados else f"{len(datos)} procesados"
             de_salida = f", {len(salidas)} de salida" if patron_salida is not None else ""

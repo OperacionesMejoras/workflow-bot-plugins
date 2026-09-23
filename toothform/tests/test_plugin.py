@@ -943,8 +943,9 @@ class FsToothCAM(FakeFs):
     salida de ese modelo (salvo que haya fallado).
     """
 
-    def __init__(self, clock, salida: str, lineas: list[str], cada: float, retraso: int = 0, **kw) -> None:
+    def __init__(self, clock, salida: str, lineas: list[str], cada: float, retraso: int = 0, sin_txt: tuple = (), **kw) -> None:
         super().__init__(**kw)
+        self.sin_txt = sin_txt
         self.clock, self.salida, self.lineas, self.cada, self.retraso = clock, salida, lineas, cada, retraso
         self.log = f"{salida}/BY275.log"
 
@@ -962,7 +963,7 @@ class FsToothCAM(FakeFs):
             self.files[self.log] = "\n".join(self.lineas[:n]) + "\n"
         for linea in self.lineas[: max(0, min(len(self.lineas), vuelta - self.retraso))]:
             _n, dato, _fecha, estado = linea.strip().split("\t")
-            if estado == "success":
+            if estado == "success" and dato not in self.sin_txt:
                 self.dirs.add(f"{self.salida}/{dato}")
                 self.files[f"{self.salida}/{dato}/{dato}.TXT"] = "x"
 
@@ -1046,12 +1047,13 @@ def test_toothcam_enviar_con_un_dato_que_falla_es_err_y_lo_nombra():
 
 def test_toothcam_enviar_con_patron_salida_espera_tambien_los_txt():
     clock = FakeClock()
-    fs = _toothcam_fs(clock, LOG_BY275, retraso=3)
+    fs = _toothcam_fs(clock, LOG_BY275, retraso=2)
 
     resultado, _, clock = _toothcam_con(fs, clock, esperados=12, patron_salida=PATRON_TXT)
 
     assert resultado.status == "ok"
-    assert clock.monotonic() >= 10.0 * (len(LOG_BY275) + 3)  # el log llegó antes que los txt
+    assert resultado.outputs["sin_salida"] == []
+    assert clock.monotonic() >= 10.0 * (len(LOG_BY275) + 2)  # el log llegó antes que los txt
 
 
 def test_toothcam_enviar_con_patron_salida_un_modelo_fallido_no_lo_deja_esperando():
@@ -1110,3 +1112,18 @@ def test_toothcam_enviar_sin_esperados_corta_en_la_primera_linea_n_de_n():
 
     assert resultado.status == "ok"
     assert resultado.outputs["exitosos"] == 1
+
+
+def test_toothcam_enviar_un_success_sin_su_txt_es_err_al_rato_no_al_timeout():
+    # BY275, 23/09/2026: 36 success en el log y 35 .txt; faltaba el de L04-A y
+    # el nodo esperaba el 36 hasta el timeout.
+    clock = FakeClock()
+    fs = _toothcam_fs(clock, LOG_BY275, sin_txt=("BY275-L06-A",))
+
+    resultado, _, clock = _toothcam_con(fs, clock, esperados=12, patron_salida=PATRON_TXT, timeout=900.0)
+
+    assert resultado.status == "err"
+    assert "BY275-L06-A" in resultado.message
+    assert resultado.outputs["sin_salida"] == ["BY275-L06-A"]
+    assert resultado.outputs["exitosos"] == 12
+    assert clock.monotonic() < 10.0 * len(LOG_BY275) + 60.0  # la gracia, no los 900 s
