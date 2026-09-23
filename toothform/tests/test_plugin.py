@@ -20,6 +20,7 @@ from dataclasses import replace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
 from backend.core.contract import ToolContext  # noqa: E402
+from backend.core.ports import PortError  # noqa: E402
 from backend.core.registry import ToolRegistry  # noqa: E402
 from backend.tests.fakes import FakeClock, FakeFs, FakeProcess, FakeWindow  # noqa: E402
 
@@ -30,6 +31,10 @@ STL = "D:/casos/QATF001/stl"
 EXE = "D:/4in1/Toothform-20260518/Toothform.exe"
 LOG_OK = "QATF001-L01-A    Export successfully\n\nTotal 1 models, of which 1 succeeded and 0 failed\n"
 LOG_FALLA = "222222-U01-A    Failed to hollow\n\nTotal 2 models, of which 1 succeeded and 1 failed\n"
+# Lo que queda cuando ToothFORM se muere exportando: líneas de éxito y ni una de totales.
+LOG_A_MEDIAS = "QATF001-L01-A    Export successfully\nQATF001-L02-A    Export successfully\n"
+# 0xC0000005, la excepción con la que se cae ToothFORM cuando no puede abrir la carpeta.
+CRASH = 3221225477
 
 
 class FsConMtimes(FakeFs):
@@ -47,13 +52,16 @@ class FsConMtimes(FakeFs):
 class ToothformFalso(FakeProcess):
     """
     Un ToothFORM por cmd guionado: al correr deja (o no) un log en la carpeta
-    de salida, como hace el real. El exit code es 2 siempre, como el real
-    también —lo que el tool no puede usar para decidir.
+    de salida, como hace el real. El exit code por defecto es 2, como el real
+    cuando termina —bien o mal—, así que no sirve para decidir; se pasa
+    `exit_code` para los casos en que se muere y Windows contesta una excepción.
     """
 
-    def __init__(self, fs, log: str | None, nombre="20260914.13.32.08.log", timed_out=False) -> None:
+    def __init__(
+        self, fs, log: str | None, nombre="20260914.13.32.08.log", timed_out=False, exit_code=2,
+    ) -> None:
         super().__init__()
-        self.stub(EXE, exit_code=2)
+        self.stub(EXE, exit_code=exit_code)
         self.fs, self.log, self.nombre, self.timed_out = fs, log, nombre, timed_out
 
     def run(self, command, *, cwd=None, timeout=None, env=None):
@@ -64,13 +72,14 @@ class ToothformFalso(FakeProcess):
         return replace(resultado, timed_out=self.timed_out)
 
 
-def _ctx_factory(node_params, context=None):
+def _ctx_factory(node_params, context=None, logs=None):
     def factory(declaracion, ports=None):
         declarados, extras = declaracion.split_params(node_params, {})
         return ToolContext(
             run_id="run-test", case_id="QATF001",
             params=declarados, extras=extras, config={}, context=context or {},
-            log=lambda *_a, **_k: None, ports=ports or {},
+            log=(lambda m, *_a, **_k: logs.append(m)) if logs is not None else (lambda *_a, **_k: None),
+            ports=ports or {},
         )
 
     return factory
@@ -93,12 +102,12 @@ def _check_log(fs, clock=None, **params):
     )
 
 
-def _exportar(fs=None, process=None, **params):
+def _exportar(fs=None, process=None, logs=None, **params):
     fs = fs or FsConMtimes(dirs=(STL, SALIDA))
     process = process or ToothformFalso(fs, LOG_OK)
     resultado = _registry(fs=fs, process=process).execute(
         "toothform.exportar",
-        _ctx_factory({"ejecutable": EXE, "carpeta": STL, "salida": SALIDA, **params}),
+        _ctx_factory({"ejecutable": EXE, "carpeta": STL, "salida": SALIDA, **params}, logs=logs),
     )
     return resultado, fs, process
 
@@ -164,6 +173,90 @@ def test_exportar_sin_log_es_err_y_lo_dice_no_se_confunde_con_un_export_fallido(
     assert "sin dejar un log" in resultado.message
     assert resultado.outputs["hubo_log"] == "no"
     assert resultado.outputs["log_file"] == ""
+
+
+def test_exportar_anota_cuantos_stl_va_a_cargar_toothform_de_una():
+    """
+    Toothform.exe es de 32 bits: 2 GB de techo, y carga la carpeta entera. El
+    volumen en el log es lo único que después explica un 0xC0000005 a los
+    treinta segundos, cuando ya no quedó log de la app que leer.
+    """
+    fs = FsConMtimes(dirs=(SALIDA,), files={
+        f"{STL}/QATF001-L01-A.stl": "x" * 2_097_152,
+        f"{STL}/QATF001-L02-A.stl": "x" * 1_048_576,
+        f"{STL}/lean.txt": "no es un STL",
+    })
+    logs = []
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK), logs=logs)
+
+    assert resultado.status == "ok", resultado.message
+    assert any("2 STL, 3 MB a cargar de una" in m for m in logs), logs
+
+
+def test_exportar_corre_igual_si_no_puede_medir_la_carpeta():
+    """El volumen es diagnóstico: un share que no se deja listar no frena el export."""
+
+    class SinListar(FsConMtimes):
+        def list_dir(self, path):
+            if path == STL:
+                raise PortError("el share no contesta")
+            return super().list_dir(path)
+
+    fs = SinListar(dirs=(STL, SALIDA))
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK))
+
+    assert resultado.status == "ok", resultado.message
+
+
+def test_exportar_es_err_si_se_murio_a_la_mitad_aunque_el_log_diga_export_successfully():
+    """
+    El caso que puso un export incompleto en producción: ToothFORM se muere
+    exportando, el log queda con las líneas de éxito que alcanzó a escribir y
+    sin la de totales, y leerlo por palabras da ok —así el flujo seguía por la
+    rama buena con la mitad de los datos exportados.
+    """
+    fs = FsConMtimes(dirs=(STL, SALIDA))
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_A_MEDIAS, exit_code=CRASH))
+
+    assert resultado.status == "err", resultado.message
+    assert "sin la" in resultado.message and "totales" in resultado.message
+    assert resultado.outputs["exit_code"] == CRASH
+    # El log igual se expone entero: es lo que el flujo copia a la carpeta del caso.
+    assert resultado.outputs["hubo_log"] == "si"
+    assert resultado.outputs["exportados"] == ["QATF001-L01-A", "QATF001-L02-A"]
+
+
+def test_exportar_respeta_el_log_completo_aunque_el_proceso_se_caiga_despues():
+    """
+    Con la línea de totales, ToothFORM ya dijo cómo le fue: el crash es de
+    después y el export está hecho. Fallar ahí frenaría casos terminados.
+    """
+    fs = FsConMtimes(dirs=(STL, SALIDA))
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK, exit_code=CRASH))
+
+    assert resultado.status == "ok", resultado.message
+    assert resultado.outputs["exitosos"] == 1
+    assert resultado.outputs["exit_code"] == CRASH
+
+
+def test_exportar_con_un_log_sin_totales_pero_sin_crash_sigue_leyendose_por_palabras():
+    """La lectura por palabras existe para versiones que no escriben totales; el crash no las toca."""
+    fs = FsConMtimes(dirs=(STL, SALIDA))
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_A_MEDIAS))
+
+    assert resultado.status == "ok", resultado.message
+    assert resultado.outputs["exit_code"] == 2
+
+
+def test_exportar_sin_log_distingue_el_crash_de_una_ruta_que_la_app_no_ve():
+    fs = FsConMtimes(dirs=(STL, SALIDA))
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log=None, exit_code=CRASH))
+
+    assert resultado.status == "err"
+    assert "0xC0000005" in resultado.message
+    assert "sin dejar un log" not in resultado.message
+    assert resultado.outputs["hubo_log"] == "no"
+    assert resultado.outputs["exit_code"] == CRASH
 
 
 def test_exportar_ignora_un_log_viejo_que_ya_estaba_en_la_salida():

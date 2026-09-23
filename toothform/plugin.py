@@ -12,13 +12,16 @@ Tres tools, y el orden en que aparecieron explica por qué hay tres:
   diálogo de archivo que llenar, ni operador que tenga que dejar el STL
   cargado: es el camino para producción.
 
-  Lo que se verificó en esa versión y el tool asume: el exit code es siempre
-  2 (también con un JSON inexistente), así que el resultado se lee del log y
-  no del proceso; el log `<fecha>.<hora>.log` cae en `ExportPrintPath`; el
-  export queda en `<ExportPrintPath>\\<nombre del dato>\\` (el prefijo del
-  STL antes del primer `-`); y una ruta con caracteres fuera de ASCII en el
-  JSON hace que no exporte nada ni deje log, en cualquier codificación. Por
-  eso el tool corta antes de correr si alguna ruta no es ASCII.
+  Lo que se verificó en esa versión y el tool asume: el exit code es 2
+  siempre que ToothFORM llegue a terminar —también con un JSON inexistente—,
+  así que el resultado se lee del log y no del proceso. La excepción es el
+  rango de excepción de Windows (0xC0000005 y compañía): ahí la app no
+  terminó, se murió, y lo que haya quedado en el log no se puede creer. El
+  log `<fecha>.<hora>.log` cae en `ExportPrintPath`; el export queda en
+  `<ExportPrintPath>\\<nombre del dato>\\` (el prefijo del STL antes del
+  primer `-`); y una ruta con caracteres fuera de ASCII en el JSON hace que
+  no exporte nada ni deje log, en cualquier codificación. Por eso el tool
+  corta antes de correr si alguna ruta no es ASCII.
 
 - `add_qr` usa `window` (v0.3.0-beta.3, issue #12 del núcleo): encuentra la
   ventana de ToothFORM y clickea "Export". Es el camino para el release
@@ -66,6 +69,7 @@ import time
 
 from backend.core import ports as port_names
 from backend.core.contract import (
+    STATUS_OK,
     FunctionTool,
     Output,
     Param,
@@ -77,6 +81,7 @@ from backend.core.contract import (
     ToolManifest,
     ToolResult,
 )
+from backend.core.ports import PortError
 
 # Medido el 14/09/2026 con un STL de 20 MB: cada Toothform.exe usa un core
 # (es monohilo) y llega a ~700 MB de RAM; dos en paralelo tardan lo mismo
@@ -142,6 +147,24 @@ _PATRON_TOTAL = re.compile(
 )
 # Cada modelo, una línea: "<nombre>    Export successfully" / "<nombre>    Failed to hollow".
 _PATRON_EXITO = re.compile(r"^(\S+)\s+Export successfully\s*$", re.I | re.M)
+
+
+def _crasheo(exit_code: int) -> bool:
+    """
+    ToothFORM termina en 2 aunque haya exportado todo bien, así que "distinto
+    de cero" no dice nada. Lo que sí dice es el rango de excepción de Windows
+    —0xC0000005 access violation, 0xC0000409 stack overrun, …—: con uno de
+    ésos el proceso no terminó, se murió, y lo que haya en el log es lo que
+    alcanzó a escribir antes de morirse.
+    """
+    return exit_code < 0 or exit_code >= 0xC000_0000
+
+
+def _como_termino(exit_code: int) -> str:
+    return f"exit {exit_code}" + (
+        f" (0x{exit_code & 0xFFFF_FFFF:08X}, excepción de Windows)" if _crasheo(exit_code) else ""
+    )
+
 
 _SALIDAS_LOG = (
     Output("log_file", ParamType.STR, doc="Nombre del archivo de log encontrado (vacío si no hubo)."),
@@ -233,6 +256,12 @@ EXPORTAR = ToolManifest(
         Output("exportados", ParamType.JSON, doc="Nombres de los datos que exportaron bien."),
         Output("carpeta_export", ParamType.PATH, doc="<salida>\\<nombre del primer dato exportado>, donde ToothFORM dejó los archivos."),
         Output("config", ParamType.PATH, doc="El JSON que se le pasó a ToothFORM, para revisarlo."),
+        Output(
+            "exit_code", ParamType.INT,
+            doc="Con qué terminó Toothform.exe. Es 2 aun exportando bien, así que sólo sirve para "
+            "distinguir un crash: 3221225477 (0xC0000005) y demás códigos del rango 0xC0000000 "
+            "son excepciones de Windows, ahí la app se murió y el log quedó a medias o no salió.",
+        ),
     ),
 )
 
@@ -293,7 +322,15 @@ def _exportar(ctx: ToolContext) -> ToolResult:
     }
     ruta_config = fs.join(salida, f"toothform-{ctx.case_id or 'export'}.json")
     fs.write_text(ruta_config, json.dumps(config, indent=2))
-    ctx.log(f"ToothFORM cmd: {tipo} de {carpeta} → {salida} ({ruta_config})")
+    # ToothFORM carga de una todos los STL de la carpeta, y es un proceso de 32
+    # bits: 2 GB de techo. Dejar el volumen en el log es lo que después explica
+    # un 0xC0000005 a los treinta segundos, cuando ya no hay nada que leer.
+    try:
+        stl = [e for e in fs.list_dir(carpeta) if not e.is_dir and e.name.lower().endswith(".stl")]
+        volumen = f"; {len(stl)} STL, {sum(e.size for e in stl) / (1024 * 1024):.0f} MB a cargar de una"
+    except PortError:
+        volumen = ""  # el dato es para el diagnóstico: no vale frenar un export por él
+    ctx.log(f"ToothFORM cmd: {tipo} de {carpeta} → {salida} ({ruta_config}){volumen}")
 
     timeout = ctx.params["timeout"]
     maximo = int(ctx.config(MAX_SIMULTANEOS) or 0)
@@ -313,12 +350,23 @@ def _exportar(ctx: ToolContext) -> ToolResult:
     sin_log = dict(
         log_file="", checkLogResult={"log_file": "", "message": ""}, exitosos=0, fallidos=0,
         log_texto="", hubo_log="no", exportados=[], carpeta_export="", config=ruta_config,
+        exit_code=corrida.exit_code,
     )
     if corrida.timed_out:
         return ToolResult.err(f"ToothFORM no terminó en {timeout:g} s", **sin_log)
 
     nuevos = [e for e in _logs(fs, salida) if e.name not in previos]
     if not nuevos:
+        if _crasheo(corrida.exit_code):
+            return ToolResult.err(
+                f"ToothFORM se murió antes de escribir el log ({_como_termino(corrida.exit_code)}): no "
+                f"exportó nada de {carpeta}. Toothform.exe es de 32 bits y sin "
+                "LARGEADDRESSAWARE: no pasa de 2 GB de memoria por más RAM que tenga la "
+                "máquina, y carga TODOS los STL de la carpeta, no sólo los que el flujo "
+                "filtró. Con una carpeta grande se queda sin espacio y muere antes del log. "
+                "Para eso está 'archivos': mandarle sólo los que se van a exportar, de a tandas.",
+                **sin_log,
+            )
         return ToolResult.err(
             f"ToothFORM terminó (exit {corrida.exit_code}) sin dejar un log en {salida}: "
             "la carpeta de STL o la de salida no existe para la app, o el JSON no se pudo leer",
@@ -328,9 +376,26 @@ def _exportar(ctx: ToolContext) -> ToolResult:
     texto = fs.read_text(reciente.path, encoding="utf-8")
     exportados = _PATRON_EXITO.findall(texto)
     carpeta_export = fs.join(salida, exportados[0].split("-")[0]) if exportados else ""
-    return _interpretar_log(
-        ctx, reciente.name, texto,
-        hubo_log="si", exportados=exportados, carpeta_export=carpeta_export, config=ruta_config,
+    resultado = _interpretar_log(
+        ctx, reciente.name, texto, hubo_log="si", exportados=exportados,
+        carpeta_export=carpeta_export, config=ruta_config, exit_code=corrida.exit_code,
+    )
+    if not _crasheo(corrida.exit_code):
+        return resultado
+    # Se murió exportando. Si el log tiene la línea de totales, ToothFORM llegó
+    # a decir cómo le fue y el crash es de después; se respeta lo que dijo. Si
+    # no la tiene, el log quedó a medias y las líneas que alcanzó a escribir
+    # dicen "Export successfully": leído por palabras eso da ok, el flujo sigue
+    # por la rama buena y el caso avanza con la mitad de los datos exportados.
+    if _PATRON_TOTAL.search(texto) is not None:
+        ctx.log(f"ToothFORM dejó el log entero pero {_como_termino(corrida.exit_code)}", "warning")
+        return resultado
+    if resultado.status != STATUS_OK:
+        return resultado
+    return ToolResult.err(
+        f"ToothFORM se murió exportando ({_como_termino(corrida.exit_code)}): {reciente.name} quedó sin la "
+        f"línea de totales, con {len(exportados)} dato(s) exportado(s) de los que haya habido",
+        **resultado.outputs,
     )
 
 
