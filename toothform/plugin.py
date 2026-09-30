@@ -34,8 +34,10 @@ Tres tools, y el orden en que aparecieron explica por qué hay tres:
   El log `<fecha>.<hora>.log` cae en `ExportPrintPath`; el export queda en
   `<ExportPrintPath>\\<nombre del dato>\\` (el prefijo del STL antes del
   primer `-`); y una ruta con caracteres fuera de ASCII en el JSON hace que
-  no exporte nada ni deje log, en cualquier codificación. Por eso el tool
-  corta antes de correr si alguna ruta no es ASCII.
+  no exporte nada ni deje log, en cualquier codificación. Como las carpetas
+  de caso llevan el nombre del paciente (BY163 "Pérez Maríano"), cuando
+  alguna ruta no es ASCII el tool copia los STL a `carpeta_ascii`, hace
+  exportar ahí y después mueve lo exportado a la salida de verdad.
 
 - `add_qr` usa `window` (v0.3.0-beta.3, issue #12 del núcleo): encuentra la
   ventana de ToothFORM y clickea "Export". Es el camino para el release
@@ -83,7 +85,8 @@ import json
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass, field, replace
 
 from backend.core import ports as port_names
 from backend.core.contract import (
@@ -109,7 +112,7 @@ MAX_SIMULTANEOS = "toothformMaxSimultaneos"
 MANIFEST = PluginManifest(
     name="toothform",
     label="ToothFORM",
-    version="0.6.0",
+    version="0.7.0",
     doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana—, leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
     ports=(port_names.PROCESS, port_names.FS, port_names.CLOCK, port_names.WINDOW),
     settings=(
@@ -407,7 +410,9 @@ EXPORTAR = ToolManifest(
         "antes queda. Las salidas vienen unificadas y 'tandas' dice en cuántas fue. El "
         "export queda en <salida>\\<nombre del dato>. Cualquier parámetro de "
         "ParameterSettings del Toothform.ini se puede pasar como param extra (ej. "
-        "LimitX=3.0). El ejecutable tiene que estar en process_allowlist, y las rutas ser ASCII."
+        "LimitX=3.0). El ejecutable tiene que estar en process_allowlist y en una ruta ASCII; "
+        "si 'carpeta' o 'salida' tienen acentos o ñ, se trabaja en 'carpeta_ascii' y al "
+        "terminar lo exportado se mueve a 'salida'."
     ),
     params=(
         Param("ejecutable", required=True, doc="Ruta de Toothform.exe, ej. D:\\4in1\\Toothform-20260518\\Toothform.exe."),
@@ -434,6 +439,13 @@ EXPORTAR = ToolManifest(
             "en tandas, lo que salió antes de la que se corta queda exportado y el log dice "
             "hasta dónde llegó. Más chico acorrala mejor pero tarda más: son ~14 s por STL "
             "más el arranque de cada tanda. 0 desactiva las tandas (todo de una, como antes).",
+        ),
+        Param(
+            "carpeta_ascii", ParamType.PATH, default="C:\\toothform-tmp",
+            doc="Carpeta local, con ruta sin acentos ni ñ, donde se trabaja cuando 'carpeta', "
+            "'archivos' o 'salida' los tienen: ToothFORM no abre esas rutas. Se copian los STL a "
+            "<carpeta_ascii>\\<caso>, se exporta ahí y lo exportado (log, JSON y carpeta del dato) "
+            "se mueve a 'salida'. Si falla, la copia de entrada queda ahí para reproducirlo.",
         ),
     ),
     extra_params=True,
@@ -478,13 +490,94 @@ def _exportar(ctx: ToolContext) -> ToolResult:
             "hace falta 'carpeta' (todos los STL de adentro) o 'archivos' (sólo ésos), no las dos "
             "ni ninguna" if carpeta else "hace falta 'carpeta' o 'archivos'"
         )
-    no_ascii = [r for r in (ejecutable, carpeta, salida, *archivos) if r and not str(r).isascii()]
-    if no_ascii:
+    if not str(ejecutable).isascii():
         return ToolResult.err(
-            "ToothFORM no encuentra rutas con caracteres fuera de ASCII (acentos, ñ) y termina sin "
-            f"exportar ni dejar log; usar una ruta o junction ASCII: {' · '.join(no_ascii)}"
+            "ToothFORM no arranca bien desde una ruta con caracteres fuera de ASCII (acentos, ñ): "
+            f"instalarlo en una ruta ASCII: {ejecutable}"
+        )
+    raros = [a for a in archivos if not fs.basename(a).isascii()]
+    if raros:
+        return ToolResult.err(
+            "estos STL tienen acentos o ñ en el nombre, y ToothFORM no los abre ni con copia: "
+            + ", ".join(raros)
         )
 
+    # Las carpetas de caso llevan el nombre del paciente, así que acentos y ñ
+    # van a aparecer. ToothFORM no los abre —termina sin exportar ni dejar
+    # log—, entonces se trabaja en una carpeta ASCII y al final se trae lo
+    # exportado a la salida de verdad.
+    if all(str(r).isascii() for r in (carpeta, salida, *archivos) if r):
+        return _exportar_en(ctx, fs, process, ejecutable, carpeta, archivos, salida, tipo)
+    base = ctx.params.get("carpeta_ascii") or ""
+    if not base or not str(base).isascii():
+        return ToolResult.err(
+            "la ruta del caso tiene acentos o ñ y ToothFORM no la abre; hace falta 'carpeta_ascii' "
+            f"con una ruta sin ellos para trabajar ahí (vino '{base}')"
+        )
+    trabajo = fs.join(base, _nombre_ascii(ctx.case_id))
+    if fs.exists(trabajo):
+        fs.remove_tree(trabajo)  # restos de una corrida anterior del mismo caso
+    ctx.log(
+        f"la ruta del caso tiene acentos o ñ, que ToothFORM no abre: se exporta en {trabajo} y "
+        f"después se mueve a {salida}"
+    )
+    resultado = _exportar_en(ctx, fs, process, ejecutable, carpeta, archivos, trabajo, tipo)
+    return _traer(ctx, fs, trabajo, salida, resultado)
+
+
+def _nombre_ascii(texto: str | None) -> str:
+    """`texto` sin lo que no sea ASCII (á → a), para nombres de carpeta/archivo que ve ToothFORM."""
+    limpio = unicodedata.normalize("NFKD", str(texto or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^\w.-]+", "_", limpio).strip("_") or "export"
+
+
+def _mover_encima(fs, origen: str, destino: str) -> None:
+    """Mueve `origen` a `destino`, fusionando carpetas y pisando archivos que ya estén."""
+    if not fs.exists(destino):
+        fs.move(origen, destino)
+    elif fs.is_dir(origen) and fs.is_dir(destino):
+        for e in fs.list_dir(origen):
+            _mover_encima(fs, e.path, fs.join(destino, e.name))
+        fs.remove_tree(origen)
+    else:
+        if fs.is_dir(destino):
+            fs.remove_tree(destino)
+        else:
+            fs.remove_file(destino)
+        fs.move(origen, destino)
+
+
+def _traer(ctx: ToolContext, fs, trabajo: str, salida: str, resultado: ToolResult) -> ToolResult:
+    """
+    Mueve lo que ToothFORM dejó en `trabajo` a `salida` y corrige las rutas de
+    las salidas. Con éxito o sin él: el log de un export fallido es lo que el
+    flujo copia para avisar. La copia de entrada no se mueve —si falló, queda
+    en `trabajo` para reproducir la corrida.
+    """
+    outputs = dict(resultado.outputs or {})
+    for clave in ("carpeta_export", "config"):
+        valor = outputs.get(clave)
+        if isinstance(valor, str) and valor.startswith(trabajo):
+            outputs[clave] = salida + valor[len(trabajo):]
+    try:
+        fs.make_dirs(salida)
+        for e in fs.list_dir(trabajo):
+            if e.is_dir and e.name.startswith("entrada-"):
+                continue
+            _mover_encima(fs, e.path, fs.join(salida, e.name))
+        if not fs.list_dir(trabajo):
+            fs.remove_tree(trabajo)
+    except PortError as exc:
+        return ToolResult.err(
+            f"ToothFORM exportó en {trabajo} pero no se pudo mover a {salida}: {exc}", **outputs,
+        )
+    ctx.log(f"lo exportado se movió de {trabajo} a {salida}")
+    return replace(resultado, outputs=outputs)
+
+
+def _exportar_en(
+    ctx: ToolContext, fs, process, ejecutable: str, carpeta: str, archivos: list, salida: str, tipo: str,
+) -> ToolResult:
     fs.make_dirs(salida)
 
     # Qué se va a exportar, venga de 'archivos' o del contenido de 'carpeta'.
@@ -508,7 +601,15 @@ def _exportar(ctx: ToolContext) -> ToolResult:
             return ToolResult.err(f"no hay ningún .stl en {carpeta}")
 
     limite = int((ctx.params["max_mb_por_tanda"] or 0) * _MB)
-    if fuentes is None or (not archivos and (limite <= 0 or _peso(fuentes) <= limite)):
+    # Una carpeta con acentos no se le puede pasar tal cual: se copia como si
+    # fueran archivos sueltos, a la de entrada, que cuelga de 'salida' (ASCII).
+    directa = bool(carpeta) and str(carpeta).isascii()
+    if fuentes is None and not directa:
+        return ToolResult.err(
+            f"no se pudo listar {carpeta} para copiar los STL a una ruta ASCII, y ToothFORM no "
+            "la abre directo"
+        )
+    if fuentes is None or (directa and (limite <= 0 or _peso(fuentes) <= limite)):
         # Entra de una y ya está en su propia carpeta: se la pasamos tal cual,
         # sin copiar nada. Es el camino de siempre.
         grupos: list = [None]
@@ -524,8 +625,8 @@ def _exportar(ctx: ToolContext) -> ToolResult:
     # se copia a una propia. Se vacía antes de cada una: lo que quedó de la
     # anterior se exportaría de nuevo sin que nadie lo pidiera, y ése es el tipo
     # de error que se ve como un export "de más" y no como una falla.
-    entrada = fs.join(salida, f"entrada-{ctx.case_id or 'export'}")
-    ruta_config = fs.join(salida, f"toothform-{ctx.case_id or 'export'}.json")
+    entrada = fs.join(salida, f"entrada-{_nombre_ascii(ctx.case_id)}")
+    ruta_config = fs.join(salida, f"toothform-{_nombre_ascii(ctx.case_id)}.json")
     config = {
         "FilesToProcess": {"OpenFolder": carpeta, "Type": tipo},
         "General": {"ExportPrintPath": salida, "ExportFilePath": salida},

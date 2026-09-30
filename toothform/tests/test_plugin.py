@@ -79,7 +79,9 @@ class ToothformFalso(FakeProcess):
         self._anotar(command)
         resultado = super().run(command, cwd=cwd, timeout=timeout, env=env)
         if self.log is not None:
-            self.fs.write_text(f"{SALIDA}/{self.nombre}", self.log)
+            salida = json.loads(self.fs.files[command[1]])["General"]["ExportPrintPath"]
+            self.fs.write_text(f"{salida}/{self.nombre}", self.log)
+            self.fs.write_text(f"{salida}/QATF001/QATF001-L01-A-qr.stl", "export")
             self.fs.mtimes[self.nombre] = 1_000.0
         return replace(resultado, timed_out=self.timed_out)
 
@@ -312,9 +314,57 @@ def test_exportar_con_timeout_es_err_sin_log():
     assert resultado.outputs["hubo_log"] == "no"
 
 
-def test_exportar_corta_antes_de_correr_si_una_ruta_no_es_ascii():
-    fs = FsConMtimes(dirs=("D:/instalación/stl", SALIDA))
-    resultado, _fs, process = _exportar(fs=fs, carpeta="D:/instalación/stl")
+# BY163: la carpeta del caso lleva el nombre del paciente, con tildes.
+CASO_TILDES = "//SERVER-NUEVO/casos terminados/BY163 Pérez Maríano 2.1"
+STL_TILDES = f"{CASO_TILDES}/Pérez Maríano 2.1 stl"
+TMP = "C:/toothform-tmp"
+
+
+def _disco_tildes(files=None):
+    return FsConMtimes(
+        {f"{STL_TILDES}/QATF001-L01-A.stl": "solid", f"{STL_TILDES}/QATF001-U01-A.stl": "solid", **(files or {})},
+        (STL_TILDES, CASO_TILDES),
+    )
+
+
+def test_exportar_con_tildes_en_la_ruta_exporta_en_carpeta_ascii_y_lo_mueve_a_la_salida():
+    fs = _disco_tildes()
+    resultado, fs, process = _exportar(fs=fs, carpeta=STL_TILDES, salida=CASO_TILDES)
+
+    assert resultado.status == "ok", resultado.message
+    # Lo que vio ToothFORM es todo ASCII: copia de los STL dentro de la carpeta temporal.
+    config_visto = process.calls[0]["command"][1]
+    assert config_visto.startswith(f"{TMP}/QATF001/")
+    assert process.cargadas == [["QATF001-L01-A.stl", "QATF001-U01-A.stl"]]
+    # Y lo exportado terminó en la carpeta del caso, con las salidas apuntando ahí.
+    assert f"{CASO_TILDES}/20260914.13.32.08.log" in fs.files
+    assert f"{CASO_TILDES}/QATF001/QATF001-L01-A-qr.stl" in fs.files
+    assert resultado.outputs["carpeta_export"] == f"{CASO_TILDES}/QATF001"
+    assert resultado.outputs["config"] == f"{CASO_TILDES}/toothform-QATF001.json"
+    assert not any(k.startswith(TMP) for k in fs.files)  # no deja basura
+
+
+def test_exportar_con_tildes_y_log_de_falla_igual_trae_el_log_y_deja_la_entrada():
+    fs = _disco_tildes()
+    resultado, fs, _p = _exportar(
+        fs=fs, process=ToothformFalso(fs, LOG_FALLA), carpeta=STL_TILDES, salida=CASO_TILDES,
+    )
+
+    assert resultado.status == "err"
+    assert f"{CASO_TILDES}/20260914.13.32.08.log" in fs.files  # para que el flujo lo copie
+    assert f"{TMP}/QATF001/entrada-QATF001/QATF001-L01-A.stl" in fs.files  # para reproducirlo
+
+
+def test_exportar_con_tildes_pisa_un_export_anterior_del_mismo_dato():
+    fs = _disco_tildes({f"{CASO_TILDES}/QATF001/QATF001-L01-A-qr.stl": "viejo"})
+    resultado, fs, _p = _exportar(fs=fs, carpeta=STL_TILDES, salida=CASO_TILDES)
+
+    assert resultado.status == "ok", resultado.message
+    assert fs.files[f"{CASO_TILDES}/QATF001/QATF001-L01-A-qr.stl"] == "export"
+
+
+def test_exportar_con_el_ejecutable_en_una_ruta_con_tildes_es_err_sin_correr():
+    resultado, _fs, process = _exportar(ejecutable="D:/instalación/Toothform.exe")
 
     assert resultado.status == "err"
     assert "ASCII" in resultado.message
