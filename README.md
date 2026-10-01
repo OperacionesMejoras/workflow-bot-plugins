@@ -51,7 +51,10 @@ del núcleo; comentarios y commits en castellano que explican el por qué.
 | name | qué hace | ports |
 |---|---|---|
 | `archivos` | mover, copiar, eliminar, renombrar y buscar (etiqueta o regex) | fs |
-| `procesos` | saber si un programa está corriendo | process |
+| `procesos` | saber si un programa está corriendo, y correr un comando cualquiera (`procesos.ejecutar`) esperando a que termine | process |
 | `toothform` | exportar STL con QR en ToothFORM (cmd o ventana) y leer su log; el release de la app está aparte, en `instaladores/toothform/`, para que no viaje con el plugin | process, fs, clock, window |
 | `bots` | hablar con otros Bots de la red: qué hacen, mandarles un caso sin esperar, esperar el resultado; la API que usa un agente remoto (ver `bots/README.md`) | http, clock |
+| `laya` | decisiones tipadas sobre un texto o una fila (sí/no, elegir, puntuar) con Laya, un modelo local que corre aparte como `laya-serve`; ver [`laya/README.md`](./laya/README.md) | http |
+| `sqlite` | consultas de sólo lectura, guardadas y reutilizables en un flujo (`sqlite.consultar`), contra un archivo SQLite externo; ver [`sqlite/README.md`](./sqlite/README.md) | sqlite_file |
+| `mariadb` | lo mismo que `sqlite`, contra un servidor MySQL/MariaDB externo (`mariadb.consultar`); el protocolo está implementado a mano sobre el port `socket`, sin driver. Ver [`mariadb/README.md`](./mariadb/README.md) | socket |
 | `model-arranger` | **DRAFT, sin tools** — acomodar arcadas (STL) en la cama de una impresora 3D y exportar el STL de la cama; ver el docstring de `model_arranger/plugin.py` para lo que falta decidir (binario sparrow, acceso a archivos por `fs`) | fs, process |
