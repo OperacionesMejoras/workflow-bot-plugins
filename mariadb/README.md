@@ -6,7 +6,7 @@ servidor **MySQL o MariaDB** externo — segundo plugin de la serie
 primero).
 
 Se instala solo, sin dependencias. Pide el port `socket`
-(`workflow-bot-core>=0.3.1-beta.18` — issue #39).
+(`workflow-bot-core>=0.4.0-beta.1` — issue #39).
 
 ## Por qué no hay un driver adentro
 

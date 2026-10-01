@@ -4,8 +4,8 @@ Consultas de sólo lectura, guardadas y reutilizables en un flujo, contra un
 archivo SQLite externo — no la base del propio Bot.
 
 Se instala solo, sin dependencias. Pide el port `sqlite_file`
-(`workflow-bot-core>=0.3.1-beta.18` o la rama `develop` posterior al
-17 de workflow-bot-core#40 — cualquier núcleo anterior no lo tiene).
+(`workflow-bot-core>=0.4.0-beta.1`, workflow-bot-core#40 — cualquier
+núcleo anterior no lo tiene).
 
 ## De dónde viene
 
