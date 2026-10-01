@@ -1,14 +1,14 @@
 {
   "name": "model-arranger",
-  "description": "DRAFT, sin tools todavia: acomodar arcadas (STL) en la cama de una impresora 3D y exportar el STL de la cama lista para imprimir.",
+  "description": "Órdenes, piezas y nests del taller de model-arranger desde un flujo (ingresar STL, validar, anidar, cerrar, salud del servidor), por su API HTTP; el motor corre aparte en taller_server.py.",
   "source": "workflow-bot-plugin-model-arranger",
   "path": "model_arranger",
   "ports": [
-    "fs",
-    "process"
+    "http",
+    "clock"
   ],
   "maintainer": "OperacionesMejoras",
   "repo_url": "https://github.com/OperacionesMejoras/workflow-bot-plugins",
-  "compatible_core": ">=0.3.0b4",
+  "compatible_core": ">=0.4.0b1",
   "license": "MIT"
 }
