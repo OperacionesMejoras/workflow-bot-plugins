@@ -24,6 +24,10 @@ rompe clientes). Lo que importa de él para un flujo:
 - Una tarea por vez: si hay otra corriendo, el taller contesta 409 con el id
   de esa. El plugin espera a que termine y reintenta una vez, en vez de
   fallar: dos flujos que anidan a la vez se ponen en fila solos.
+- El historial de tareas vive en memoria del taller: si se reinició, un
+  `tarea_id` viejo da 400 "tarea desconocida". Eso no es un error del flujo:
+  se relee la orden o el nest, que sí están en la base, y se informa lo que
+  dicen (un cierre que no terminó es `err`: el nest sigue abierto).
 - Los errores de negocio ("pieza en un nest cerrado", "orden inexistente")
   son 400 con `{error}`: salen tal cual en el `err` del tool.
 - Los archivos van por ruta de carpeta: el Bot y el taller en la misma PC, o
@@ -93,7 +97,7 @@ CREAR_FUENTES = Action(
 MANIFEST = PluginManifest(
     name="model-arranger",
     label="Model Arranger",
-    version="0.1.0",
+    version="0.1.1",
     doc=(
         "Órdenes, piezas y nests del taller de model-arranger desde un flujo: ingresar una carpeta de "
         "STL, validar, anidar en la cama de una impresora, cerrar y leer el resultado. "
@@ -188,7 +192,17 @@ def _esperar(ctx: ToolContext, tarea_id: int) -> dict:
     limite = reloj.monotonic() + 60 * float(ctx.config(ESPERA_MAX) or 30)
     ultima = ""
     while True:
-        estado = _pedir(ctx, "GET", "/api/tarea", query={"id": tarea_id})
+        try:
+            estado = _pedir(ctx, "GET", "/api/tarea", query={"id": tarea_id})
+        except _Falla as falla:
+            # El historial de tareas vive en memoria del taller: si se reinició,
+            # la tarea ya no está. No hay resultado que leer; quien llama relee
+            # la orden o el nest, que sí están en la base.
+            if "tarea desconocida" not in str(falla):
+                raise
+            ctx.log(f"el taller ya no conoce la tarea {tarea_id} (¿se reinició?): releo el estado")
+            return {"tarea_id": tarea_id, "tarea": "", "corriendo": False, "error": "",
+                    "resultado": None, "perdida": True}
         if not estado.get("corriendo"):
             if estado.get("error"):
                 raise _Falla(f"la tarea {tarea_id} ({estado.get('tarea')}) falló en el taller: {estado['error']}")
@@ -454,9 +468,13 @@ def _anidar(ctx: ToolContext) -> ToolResult:
     probadas = (final.get("resultado") or {}).get("probadas") or []
     entraron = [p["orden_id"] for p in probadas if p.get("entro")]
     nest = _nest(ctx, nid)
+    if final.get("perdida"):
+        # Sin el resultado de la tarea no se sabe qué órdenes probó: sólo cómo quedó el nest.
+        cuantas = "no se sabe cuáles órdenes entraron (el taller perdió la tarea)"
+    else:
+        cuantas = f"entraron {len(entraron)} de {len(probadas)} orden(es)"
     return ToolResult.ok(
-        f"{nest.get('codigo')}: entraron {len(entraron)} de {len(probadas)} orden(es), "
-        f"densidad {nest.get('densidad') or 0}, {nest.get('estado')}",
+        f"{nest.get('codigo')}: {cuantas}, densidad {nest.get('densidad') or 0}, {nest.get('estado')}",
         tarea_id=lanzado.get("tarea_id") or 0, probadas=probadas, entraron=entraron, **_salida_nest(nest),
     )
 
@@ -471,6 +489,10 @@ def _cerrar_nest(ctx: ToolContext) -> ToolResult:
     nest = _nest(ctx, nid)
     salida = _salida_nest(nest)
     salida["stl"] = (final.get("resultado") or {}).get("stl") or salida["stl"]
+    if salida["estado"] != "cerrado":
+        # Pasa si el taller se reinició a mitad del cierre: la tarea se perdió y el nest sigue abierto.
+        return ToolResult.err(f"{nest.get('codigo')} sigue {salida['estado'] or 'sin estado'}: el cierre no terminó",
+                              tarea_id=lanzado.get("tarea_id") or 0, **salida)
     return ToolResult.ok(f"{nest.get('codigo')} cerrado: {salida['stl']}", tarea_id=lanzado.get("tarea_id") or 0, **salida)
 
 
@@ -483,6 +505,11 @@ def _ver_nest(ctx: ToolContext) -> ToolResult:
 @_herramienta
 def _esperar_tarea(ctx: ToolContext) -> ToolResult:
     final = _esperar(ctx, int(ctx.params["tarea_id"]))
+    if final.get("perdida"):
+        return ToolResult.err(
+            f"el taller ya no conoce la tarea {final['tarea_id']} (se reinició o salió del historial): "
+            "leé la orden o el nest para ver cómo quedó", tarea="", resultado=None,
+        )
     return ToolResult.ok(f"tarea {final.get('tarea_id')} ({final.get('tarea')}) terminada",
                          tarea=final.get("tarea") or "", resultado=final.get("resultado"))
 

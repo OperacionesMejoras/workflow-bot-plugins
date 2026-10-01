@@ -415,3 +415,65 @@ def test_crear_fuentes_err_si_el_bot_rechaza():
 
 def test_las_fuentes_usan_la_direccion_de_config():
     assert _fuentes("http://taller:9000")[0]["url"] == "http://taller:9000/api/ordenes"
+
+
+# ── el taller se reinició y perdió el historial de tareas ─────────────────
+
+def _que_pierde_las_tareas(taller):
+    """El taller se reinicia justo después de aceptar cada tarea: /api/tarea ya no la conoce."""
+    original = taller._tarea
+
+    def perder(nombre, resultado=None, error="", al_terminar=None):
+        tid, ocupado = original(nombre, resultado, error, al_terminar=None)
+        if tid:
+            del taller.tareas[tid]
+        return tid, ocupado
+
+    taller._tarea = perder
+    return taller
+
+
+def test_tarea_perdida_en_validar_relee_la_orden():
+    taller = _que_pierde_las_tareas(Taller())
+    taller.ordenes[1]["estado"] = "con_falla"
+    r, taller, _ = _correr("validar", {"orden": 1}, taller)
+    assert r.status == "ok", r.message
+    assert r.outputs["con_falla"] == ["O-0001"]  # lo que dice la orden releída, no un resultado inventado
+    assert any("/api/orden?" in c["url"] for c in taller.calls)
+
+
+def test_esperar_tarea_perdida_es_err_claro():
+    r, _, _ = _correr("esperar_tarea", {"tarea_id": 42})
+    assert r.status == "err" and "ya no conoce" in r.message
+
+
+def test_ocupado_por_una_tarea_perdida_reintenta_igual():
+    taller = _con_nest()
+
+
+    # 409 apuntando a una tarea que /api/tarea no conoce (el taller se reinició entre medio).
+    respuestas = iter([_json({"error": "ocupado", "ocupado": True, "tarea_id": 77}, 409)])
+    original = taller._api
+
+    def api(method, path, q, b):
+        if method == "POST" and path == "/api/nest/anidar":
+            siguiente = next(respuestas, None)
+            if siguiente is not None:
+                return siguiente
+        return original(method, path, q, b)
+
+    taller._api = api
+    r, taller, _ = _correr("anidar", {"nest": 1}, taller)
+    assert r.status == "ok", r.message
+    assert len(taller.posts("/api/nest/anidar")) == 2
+
+
+def test_cerrar_que_no_termino_es_err():
+    r, _, _ = _correr("cerrar_nest", {"nest": 1}, _que_pierde_las_tareas(_con_nest()))
+    assert r.status == "err" and "sigue abierto" in r.message
+
+
+def test_anidar_con_tarea_perdida_no_inventa_cuales_entraron():
+    r, _, _ = _correr("anidar", {"nest": 1}, _que_pierde_las_tareas(_con_nest()))
+    assert r.status == "ok"
+    assert r.outputs["entraron"] == [] and "no se sabe" in r.message
