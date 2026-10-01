@@ -1,0 +1,14 @@
+{
+  "name": "model-arranger",
+  "description": "DRAFT, sin tools todavia: acomodar arcadas (STL) en la cama de una impresora 3D y exportar el STL de la cama lista para imprimir.",
+  "source": "workflow-bot-plugin-model-arranger",
+  "path": "model_arranger",
+  "ports": [
+    "fs",
+    "process"
+  ],
+  "maintainer": "OperacionesMejoras",
+  "repo_url": "https://github.com/OperacionesMejoras/workflow-bot-plugins",
+  "compatible_core": ">=0.3.0b4",
+  "license": "MIT"
+}

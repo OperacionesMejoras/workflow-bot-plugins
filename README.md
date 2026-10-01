@@ -54,3 +54,4 @@ del núcleo; comentarios y commits en castellano que explican el por qué.
 | `procesos` | saber si un programa está corriendo | process |
 | `toothform` | exportar STL con QR en ToothFORM (cmd o ventana) y leer su log; el release de la app está aparte, en `instaladores/toothform/`, para que no viaje con el plugin | process, fs, clock, window |
 | `bots` | hablar con otros Bots de la red: qué hacen, mandarles un caso sin esperar, esperar el resultado; la API que usa un agente remoto (ver `bots/README.md`) | http, clock |
+| `model-arranger` | **DRAFT, sin tools** — acomodar arcadas (STL) en la cama de una impresora 3D y exportar el STL de la cama; ver el docstring de `model_arranger/plugin.py` para lo que falta decidir (binario sparrow, acceso a archivos por `fs`) | fs, process |
