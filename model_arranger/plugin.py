@@ -523,7 +523,8 @@ _ESPERAR = Param(
 _ORDEN = Param("orden", required=True, doc="Id o código de la orden (ej. 3 u O-0003).")
 _NEST = Param("nest", required=True, doc="Id o código del nest (ej. 2 o N-0002).")
 _CARPETA = Param("carpeta", ParamType.PATH, required=True,
-                 doc="Carpeta con los STL, vista desde la PC del taller.")
+                 doc="Carpeta con los STL tal como la ve la PC del taller, que puede no ser la del Bot "
+                      "(ej. /home/.../CASOS TERMINADOS/AB123 si el taller corre en Linux).")
 _REGEX = Param("regex", doc="Vacío: el patrón de archivos guardado en el taller.")
 _SALIDA_ORDENES = (
     Output("ids", ParamType.JSON, doc="Ids de las órdenes."),
@@ -536,7 +537,7 @@ _SALIDA_NEST = (
     Output("nest", ParamType.JSON, doc="El nest: codigo, estado, modo, densidad, stl, renders, cuentas."),
     Output("estado", ParamType.STR, doc="'abierto' o 'cerrado'."),
     Output("densidad", ParamType.FLOAT),
-    Output("stl", ParamType.STR, doc="Ruta del STL de la cama, cuando está cerrado."),
+    Output("stl", ParamType.STR, doc="Ruta del STL de la cama, cuando está cerrado, en la PC del taller."),
 )
 
 
