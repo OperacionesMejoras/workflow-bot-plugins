@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 from dataclasses import replace
 
@@ -49,6 +50,12 @@ class FsConMtimes(FakeFs):
         return replace(info, modified_at=self.mtimes.get(info.name, 0.0))
 
 
+def _dejar_export(fs, salida: str, log: str) -> None:
+    """Lo que el real deja en disco: <salida>/<dato>/<modelo>-qr.stl por cada modelo que el log da por exportado."""
+    for modelo in re.findall(r"^(\S+)\s+Export successfully", log, re.M):
+        fs.write_text(f"{salida}/{modelo.split('-')[0]}/{modelo}-qr.stl", "export")
+
+
 class ToothformFalso(FakeProcess):
     """
     Un ToothFORM por cmd guionado: al correr deja (o no) un log en la carpeta
@@ -64,6 +71,7 @@ class ToothformFalso(FakeProcess):
         self.stub(EXE, exit_code=exit_code)
         self.fs, self.log, self.nombre, self.timed_out = fs, log, nombre, timed_out
         self.cargadas: list[list[str]] = []
+        self.corridas = 0
 
     def _anotar(self, command) -> None:
         """Qué STL vio ToothFORM en esta corrida: la carpeta de staging se borra al final."""
@@ -78,18 +86,21 @@ class ToothformFalso(FakeProcess):
     def run(self, command, *, cwd=None, timeout=None, env=None):
         self._anotar(command)
         resultado = super().run(command, cwd=cwd, timeout=timeout, env=env)
+        self.corridas += 1
         if self.log is not None:
+            # Cada corrida deja un log con su nombre, como el real (lleva la hora).
+            nombre = self.nombre if self.corridas == 1 else f"r{self.corridas}-{self.nombre}"
             salida = json.loads(self.fs.files[command[1]])["General"]["ExportPrintPath"]
-            self.fs.write_text(f"{salida}/{self.nombre}", self.log)
-            self.fs.write_text(f"{salida}/QATF001/QATF001-L01-A-qr.stl", "export")
-            self.fs.mtimes[self.nombre] = 1_000.0
+            self.fs.write_text(f"{salida}/{nombre}", self.log)
+            _dejar_export(self.fs, salida, self.log)
+            self.fs.mtimes[nombre] = 1_000.0 + self.corridas
         return replace(resultado, timed_out=self.timed_out)
 
 
-# Dos STL en la carpeta de entrada. Antes los tests la dejaban vacía porque
+# Un STL en la carpeta de entrada. Antes los tests la dejaban vacía porque
 # nadie la miraba; ahora el tool la lista para armar las tandas, y una carpeta
 # sin un solo .stl es un error con su propio test.
-STL_DE_PRUEBA = {f"{STL}/QATF001-L01-A.stl": "solid", f"{STL}/QATF001-U01-A.stl": "solid"}
+STL_DE_PRUEBA = {f"{STL}/QATF001-L01-A.stl": "solid"}
 
 
 def _disco(files=None, dirs=(SALIDA,), mtimes=None):
@@ -211,7 +222,9 @@ def test_exportar_anota_cuantos_stl_va_a_cargar_toothform_de_una():
         f"{STL}/lean.txt": "no es un STL",
     })
     logs = []
-    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, LOG_OK), logs=logs)
+    resultado, _fs, _p = _exportar(
+        fs=fs, process=ToothformFalso(fs, _log_de("QATF001-L01-A", "QATF001-L02-A")), logs=logs,
+    )
 
     assert resultado.status == "ok", resultado.message
     assert any("2 STL, 3 MB a cargar de una" in m for m in logs), logs
@@ -329,7 +342,9 @@ def _disco_tildes(files=None):
 
 def test_exportar_con_tildes_en_la_ruta_exporta_en_carpeta_ascii_y_lo_mueve_a_la_salida():
     fs = _disco_tildes()
-    resultado, fs, process = _exportar(fs=fs, carpeta=STL_TILDES, salida=CASO_TILDES)
+    resultado, fs, process = _exportar(
+        fs=fs, process=ToothformFalso(fs, _log_de("QATF001-L01-A", "QATF001-U01-A")), carpeta=STL_TILDES, salida=CASO_TILDES,
+    )
 
     assert resultado.status == "ok", resultado.message
     # Lo que vio ToothFORM es todo ASCII: copia de los STL dentro de la carpeta temporal.
@@ -357,7 +372,9 @@ def test_exportar_con_tildes_y_log_de_falla_igual_trae_el_log_y_deja_la_entrada(
 
 def test_exportar_con_tildes_pisa_un_export_anterior_del_mismo_dato():
     fs = _disco_tildes({f"{CASO_TILDES}/QATF001/QATF001-L01-A-qr.stl": "viejo"})
-    resultado, fs, _p = _exportar(fs=fs, carpeta=STL_TILDES, salida=CASO_TILDES)
+    resultado, fs, _p = _exportar(
+        fs=fs, process=ToothformFalso(fs, _log_de("QATF001-L01-A", "QATF001-U01-A")), carpeta=STL_TILDES, salida=CASO_TILDES,
+    )
 
     assert resultado.status == "ok", resultado.message
     assert fs.files[f"{CASO_TILDES}/QATF001/QATF001-L01-A-qr.stl"] == "export"
@@ -452,6 +469,7 @@ class ToothformPorTandas(ToothformFalso):
         resultado = FakeProcess.run(self, command, cwd=cwd, timeout=timeout, env=env)
         if texto is not None:
             self.fs.write_text(f"{SALIDA}/{nombre}", texto)
+            _dejar_export(self.fs, SALIDA, texto)
             self.fs.mtimes[nombre] = 1_000.0 + self.corridas
         return resultado
 
@@ -535,7 +553,7 @@ def test_una_carpeta_que_entra_de_una_va_tal_cual_sin_copiar_nada():
 
 def test_max_mb_por_tanda_en_cero_manda_la_carpeta_entera():
     fs = _cuatro_mb()
-    process = ToothformPorTandas(fs, [_log_de("QATF001-L00-A")])
+    process = ToothformPorTandas(fs, [_log_de(*(f"QATF001-{n}" for n in ("L00-A", "L01-A", "U00-A", "U01-A")))])
     resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=0)
 
     assert resultado.status == "ok", resultado.message
@@ -548,7 +566,7 @@ def test_max_mb_por_tanda_en_cero_manda_la_carpeta_entera():
 def test_un_stl_mas_grande_que_el_limite_se_va_solo_pero_se_va():
     """Partirlo no se puede; dejarlo afuera sería exportar de menos sin decirlo."""
     fs = _disco(files={f"{STL}/QATF001-L00-A.stl": UN_MB * 4, f"{STL}/QATF001-U00-A.stl": "chico"})
-    process = ToothformPorTandas(fs, [_log_de("QATF001-L00-A"), _log_de("QATF001-U00-A")])
+    process = ToothformPorTandas(fs, [_log_de("QATF001-L00-A"), _log_de("QATF001-L01-A", "QATF001-U00-A")])
     resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=2.5)
 
     assert resultado.status == "ok", resultado.message
@@ -590,7 +608,7 @@ def test_si_la_carpeta_no_se_deja_listar_va_entera_como_antes_de_las_tandas():
 
 def test_exportar_archivos_sueltos_los_copia_a_una_carpeta_y_apunta_ahi():
     fs = FsConMtimes(files={f"{STL}/uno.stl": "a", f"{STL}/dos.stl": "b", f"{STL}/tres.stl": "c"}, dirs=(SALIDA,))
-    process = ToothformFalso(fs, LOG_OK)
+    process = ToothformFalso(fs, _log_de("uno", "dos"))
     resultado = _registry(fs=fs, process=process).execute(
         "toothform.exportar",
         _ctx_factory({"ejecutable": EXE, "salida": SALIDA, "archivos": [f"{STL}/uno.stl", f"{STL}/dos.stl"]}),
@@ -612,7 +630,7 @@ def test_exportar_vacia_la_carpeta_de_entrada_antes_de_copiar():
         files={f"{STL}/uno.stl": "a", f"{SALIDA}/entrada-QATF001/viejo.stl": "x"},
         dirs=(SALIDA, f"{SALIDA}/entrada-QATF001"),
     )
-    resultado = _registry(fs=fs, process=ToothformFalso(fs, LOG_OK)).execute(
+    resultado = _registry(fs=fs, process=ToothformFalso(fs, _log_de("uno"))).execute(
         "toothform.exportar",
         _ctx_factory({"ejecutable": EXE, "salida": SALIDA, "archivos": [f"{STL}/uno.stl"]}),
     )
@@ -1194,3 +1212,156 @@ def test_toothcam_enviar_con_todas_las_curvas_dice_completas():
 
     assert resultado.status == "ok"
     assert resultado.outputs["curvas_completas"] == "si"
+
+
+# ── Comprobación en disco, motivos, reintento y error_kind (informe PC-14) ──
+
+
+class ToothformQueSoloEscribe(ToothformFalso):
+    """El log dice que exportó todo, pero en disco quedan sólo `escribe` de los modelos: lo de BY846 (40 pedidos, 10 escritos)."""
+
+    def __init__(self, fs, log, escribe) -> None:
+        super().__init__(fs, log)
+        self.escribe = escribe
+
+    def run(self, command, *, cwd=None, timeout=None, env=None):
+        resultado = super().run(command, cwd=cwd, timeout=timeout, env=env)
+        for ruta in list(self.fs.files):
+            if ruta.endswith("-qr.stl") and not any(m in ruta for m in self.escribe):
+                del self.fs.files[ruta]
+        return resultado
+
+
+def test_un_export_que_el_log_da_por_bueno_pero_deja_menos_stl_es_err_y_nombra_los_que_faltan():
+    fs = _disco(files={f"{STL}/QATF001-U01-A.stl": "solid"})
+    process = ToothformQueSoloEscribe(fs, LOG_OK, escribe=["L01-A"])
+    resultado, _fs, _p = _exportar(fs=fs, process=process)
+
+    assert resultado.status == "err"
+    assert resultado.error_kind == "faltan_archivos"
+    assert "QATF001-U01-A" in resultado.message
+    assert resultado.outputs["esperados"] == 2 and resultado.outputs["escritos"] == 1
+    assert resultado.outputs["faltantes"] == ["QATF001-U01-A"]
+    # El log no vio nada raro: es justo lo que la comprobación existe para atrapar.
+    assert resultado.outputs["fallidos"] == 0
+
+
+def test_la_copia_de_entrada_no_cuenta_como_salida():
+    """Los STL de `entrada-*` tienen los mismos nombres que los pedidos: si contaran, nunca faltaría nada."""
+    fs = _disco(files={f"{STL}/QATF001-U01-A.stl": "solid"})
+    process = ToothformQueSoloEscribe(fs, LOG_OK, escribe=[])
+    resultado, _fs, _p = _exportar(fs=fs, process=process, max_mb_por_tanda=0.0000001)
+
+    assert resultado.status == "err"
+    assert sorted(resultado.outputs["faltantes"]) == ["QATF001-L01-A", "QATF001-U01-A"]
+
+
+def test_con_todos_los_stl_en_la_salida_dice_esperados_y_escritos():
+    fs = _disco(files={f"{STL}/QATF001-U01-A.stl": "solid"})
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, _log_de("QATF001-L01-A", "QATF001-U01-A")))
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["esperados"] == 2 and resultado.outputs["escritos"] == 2
+    assert resultado.outputs["faltantes"] == []
+
+
+def test_un_modelo_con_nombre_que_empieza_igual_no_cuenta_como_exportado():
+    from plugins.toothform.plugin import _es_del_modelo
+
+    assert _es_del_modelo("BY070-L01-A-qr.stl", "BY070-L01-A")
+    assert not _es_del_modelo("BY070-L01-AB-qr.stl", "BY070-L01-A")
+
+
+def test_los_fallidos_traen_el_motivo_de_toothform_por_modelo():
+    fs = _disco(files={f"{STL}/QATF001-U01-A.stl": "solid"})
+    log = (
+        "QATF001-L01-A    Export successfully\n"
+        "QATF001-U01-A    Clip limit exceeded\n\n"
+        "Total 2 models, of which 1 succeeded and 1 failed\n"
+    )
+    resultado, _fs, _p = _exportar(fs=fs, process=ToothformFalso(fs, log))
+
+    assert resultado.status == "err"
+    assert resultado.error_kind == "modelo_fallido"
+    assert resultado.outputs["modelos_fallidos"] == [{"modelo": "QATF001-U01-A", "motivo": "Clip limit exceeded"}]
+
+
+def test_una_caida_sin_log_se_reintenta_una_vez_y_si_la_segunda_anda_es_ok():
+    fs = _disco()
+
+    class SeCaeLaPrimera(ToothformFalso):
+        def run(self, command, **kw):
+            hubo = self.corridas
+            self.log = None if hubo == 0 else LOG_OK
+            self.stub(EXE, exit_code=CRASH if hubo == 0 else 2)
+            return super().run(command, **kw)
+
+    process = SeCaeLaPrimera(fs, None)
+    logs = []
+    resultado, _fs, _p = _exportar(fs=fs, process=process, logs=logs)
+
+    assert process.corridas == 2
+    assert resultado.status == "ok", resultado.message
+    assert any("se repite la tanda" in l for l in logs)
+
+
+def test_una_caida_que_se_repite_es_err_crash_con_la_consola_y_cuantos_quedaron_sin_procesar():
+    fs = _disco()
+    process = ToothformFalso(fs, None, exit_code=CRASH)
+    resultado, _fs, _p = _exportar(fs=fs, process=process)
+
+    assert process.corridas == 2  # la corrida y un reintento
+    assert resultado.status == "err" and resultado.error_kind == "crash"
+    assert "sin procesar 1 de 1" in resultado.message
+    assert resultado.outputs["exit_code"] == CRASH
+    assert "stdout" in resultado.outputs and "stderr" in resultado.outputs
+
+
+def test_reintentos_en_cero_no_repite_la_tanda():
+    fs = _disco()
+    process = ToothformFalso(fs, None, exit_code=CRASH)
+    _exportar(fs=fs, process=process, reintentos=0)
+
+    assert process.corridas == 1
+
+
+def test_sin_turno_usa_su_propio_plazo_y_es_error_sin_turno():
+    from plugins.toothform import plugin as modulo
+
+    fs = _disco()
+    process = ToothformFalso(fs, LOG_OK)
+    # 'timeout' largo, 'timeout_turno' corto: la espera por un lugar es la que manda.
+    factory = _ctx_factory({
+        "ejecutable": EXE, "carpeta": STL, "salida": SALIDA, "timeout": 900, "timeout_turno": 0.05,
+    })
+
+    def con_config(declaracion, ports=None):
+        ctx = factory(declaracion, ports)
+        ctx._config[modulo.MAX_SIMULTANEOS] = 1
+        return ctx
+
+    assert modulo._TURNOS.tomar(1, 0)
+    try:
+        resultado = _registry(fs=fs, process=process).execute("toothform.exportar", con_config)
+    finally:
+        modulo._TURNOS.soltar()
+
+    assert resultado.status == "err" and resultado.error_kind == "sin_turno"
+    assert process.calls == []
+
+
+def test_con_la_salida_arriba_de_la_entrada_los_stl_de_origen_no_cuentan_como_exportados():
+    """Como en el flujo: salida = carpeta.parent. Los STL de la carpeta están adentro de la salida y se llaman igual."""
+    caso = "D:/casos/QATF001"
+    fs = FsConMtimes(
+        {f"{caso}/stl/QATF001-L01-A.stl": "solid", f"{caso}/stl/QATF001-U01-A.stl": "solid"},
+        (caso, f"{caso}/stl"),
+    )
+    process = ToothformQueSoloEscribe(fs, _log_de("QATF001-L01-A", "QATF001-U01-A"), escribe=["L01-A"])
+    resultado = _registry(fs=fs, process=process).execute(
+        "toothform.exportar", _ctx_factory({"ejecutable": EXE, "carpeta": f"{caso}/stl", "salida": caso}),
+    )
+
+    assert resultado.status == "err" and resultado.error_kind == "faltan_archivos"
+    assert resultado.outputs["faltantes"] == ["QATF001-U01-A"]
+    assert resultado.outputs["escritos"] == 1
