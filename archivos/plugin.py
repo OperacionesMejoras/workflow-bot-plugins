@@ -1,6 +1,9 @@
 """
 Plugin `archivos` — mover, copiar, eliminar y renombrar contra el port `fs`.
 
+`renombrar_lote` renombra una lista entera (las `rutas` de `buscar`) con un
+regex: saca grupos de cada nombre y arma el nuevo con ellos.
+
 Vive fuera de `webapp/` y de `backend/` a propósito: es la prueba de que un
 plugin de verdad externo (el que instalaría un tercero por entry point, no el
 atajo `local_plugins` que usa `connections`) funciona sin tocar nada del
@@ -16,6 +19,7 @@ que el propio filesystem ya sabe.
 
 from __future__ import annotations
 
+import json
 import re
 
 from backend.core import ports as port_names
@@ -35,7 +39,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="archivos",
     label="Archivos",
-    version="0.1.0",
+    version="0.2.0",
     doc="Mover, copiar, eliminar y renombrar archivos o carpetas, contra el port fs.",
     ports=(port_names.FS,),
 )
@@ -142,6 +146,228 @@ def _renombrar(ctx: ToolContext) -> ToolResult:
     final = fs.rename(ruta, ctx.params["nombre_nuevo"])
     ctx.log(f"{ruta} -> {final}")
     return ToolResult.ok(ruta=final)
+
+
+# ── renombrar_lote ──────────────────────────────────────────────────────
+
+# `<grupo>` y no `{grupo}`: lo que va entre llaves lo resuelve el flujo contra
+# el row antes de que el tool lo vea, así que `{arcada}` quedaría literal —o
+# peor, tomaría el valor de una columna que se llame igual—. Los `<>` no pueden
+# estar en un nombre de archivo de Windows, así que no chocan con nada, y dejan
+# mezclar las dos cosas: `{id_externo}_<arcada>_<step:02>.stl`.
+_GRUPO = re.compile(r"<(\w+)(?::(0\d+))?>")
+
+RENOMBRAR_LOTE = ToolManifest(
+    id="archivos.renombrar_lote",
+    label="renombrar con patrón",
+    category="ARCHIVOS",
+    doc=(
+        "Renombra una LISTA de archivos (ej. las 'rutas' de buscar): a cada nombre le pasa "
+        "'patron', saca sus grupos y arma el nombre nuevo con 'nombre_nuevo'. Con 'destino' "
+        "los deja en esa carpeta en vez de en la suya. Antes de tocar nada revisa todos: si "
+        "alguno no coincide, si dos terminan con el mismo nombre o si ya existe el destino, "
+        "no mueve ninguno."
+    ),
+    params=(
+        Param(
+            "rutas", ParamType.JSON, required=True,
+            doc="La lista de rutas, normalmente {rutas} de 'buscar'. Una sola va entre corchetes: [\"C:/x/a.stl\"].",
+        ),
+        Param(
+            "patron", required=True,
+            doc="Expresión regular sobre el NOMBRE del archivo (sin carpeta), sin distinguir mayúsculas, "
+            "con grupos con nombre. Ej.: ^Template\\d+(-0)?_(?P<arcada>lower|upper)_Stage\\d+_step"
+            "(?P<step>\\d+)_(?P<caso>.+)\\.stl$ . En el .mmd, si lleva | o una coma va entre "
+            "#quot;…#quot; (patron=#quot;…(lower|upper)…#quot;), y sin llaves de repetición ({2}): "
+            "el flujo las lee como variable; repetí el \\d.",
+        ),
+        Param(
+            "nombre_nuevo", required=True,
+            doc="El nombre que queda, con los grupos entre <>: <caso>_<arcada>_<step>.stl . "
+            "<step:02> rellena con ceros a 2 dígitos (1 → 01). <1>, <2>… son los grupos por número. "
+            "Las variables del flujo van como siempre: {id_externo}_<arcada>.stl",
+        ),
+        Param(
+            "destino", ParamType.PATH,
+            doc="Carpeta donde dejarlos. Vacío = cada uno en su carpeta (renombrar). Si no existe se crea.",
+        ),
+        Param(
+            "modo", ParamType.ENUM, default="mover", choices=("mover", "copiar"),
+            doc="'mover' saca el original (renombrar de verdad). 'copiar' deja el original como estaba.",
+        ),
+        Param(
+            "saltear_sin_coincidencia", ParamType.BOOL, default=False,
+            doc="Sin marcar, un archivo que no coincide con 'patron' frena todo. Marcado, se lo deja "
+            "como está y se sigue con los demás (el log dice cuáles).",
+        ),
+        Param(
+            "pisar", ParamType.BOOL, default=False,
+            doc="Sin marcar, si ya existe un archivo con el nombre nuevo no se toca nada. Marcado, se lo reemplaza.",
+        ),
+    ),
+    outputs=(
+        Output("rutas", ParamType.JSON, doc="Las rutas nuevas, en el mismo orden."),
+        Output("cantidad", ParamType.INT),
+        Output(
+            "variables", ParamType.JSON,
+            doc="Por archivo, los grupos del patrón y dónde quedó: [{arcada, step, …, ruta, nombre, nuevo, ruta_nueva}].",
+        ),
+        Output("salteados", ParamType.JSON, doc="Las rutas que no coincidieron y se dejaron como estaban."),
+        Output("carpeta", ParamType.PATH, doc="La carpeta donde quedó el primero."),
+    ),
+)
+
+
+def _como_lista(valor) -> list[str]:
+    """`rutas` como lista. Del flujo llega ya como lista (el núcleo convierte el
+    param JSON), pero un llamado directo puede pasar una ruta suelta o el
+    JSON de la lista como texto."""
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if texto.startswith("["):
+            try:
+                valor = json.loads(texto)
+            except ValueError:
+                return [texto]
+        else:
+            return [texto] if texto else []
+    if isinstance(valor, (list, tuple)):
+        return [str(v).strip() for v in valor if str(v or "").strip()]
+    return []
+
+
+def _armar_nombre(plantilla: str, coincidencia: re.Match) -> str:
+    """El nombre nuevo, o `KeyError` con el grupo que no existe en el patrón."""
+    grupos = coincidencia.groupdict()
+
+    def poner(m: re.Match) -> str:
+        nombre, relleno = m.group(1), m.group(2)
+        if nombre.isdigit():
+            indice = int(nombre)
+            if indice > (coincidencia.re.groups or 0):
+                raise KeyError(nombre)
+            valor = coincidencia.group(indice)
+        elif nombre in grupos:
+            valor = grupos[nombre]
+        else:
+            raise KeyError(nombre)
+        valor = valor or ""
+        if relleno and valor.isdigit():
+            valor = valor.zfill(int(relleno))
+        return valor
+
+    return _GRUPO.sub(poner, plantilla).strip()
+
+
+def _renombrar_lote(ctx: ToolContext) -> ToolResult:
+    fs = ctx.port(port_names.FS)
+    rutas = _como_lista(ctx.params.get("rutas"))
+    vacio = {"rutas": [], "cantidad": 0, "variables": [], "salteados": [], "carpeta": ""}
+    if not rutas:
+        return ToolResult.err("'rutas' está vacío: no hay nada que renombrar", **vacio)
+    try:
+        regex = re.compile(ctx.params["patron"], re.IGNORECASE)
+    except re.error as exc:
+        return ToolResult.err(f"'patron' no es una expresión regular válida: {exc}", **vacio)
+    plantilla = ctx.params["nombre_nuevo"]
+    destino = (ctx.params.get("destino") or "").strip()
+    copiar = ctx.params.get("modo") == "copiar"
+    saltear = bool(ctx.params.get("saltear_sin_coincidencia"))
+    pisar = bool(ctx.params.get("pisar"))
+
+    # Primero el plan entero, sin tocar el disco: con 10 archivos, fallar en el
+    # sexto deja la carpeta mitad renombrada y el flujo no tiene cómo volver.
+    plan, salteados, problemas = [], [], []
+    for ruta in rutas:
+        nombre = fs.basename(ruta)
+        if not fs.exists(ruta) or fs.is_dir(ruta):
+            problemas.append(f"no existe el archivo: {ruta}")
+            continue
+        coincidencia = regex.search(nombre)
+        if coincidencia is None:
+            if saltear:
+                salteados.append(ruta)
+            else:
+                problemas.append(f"'{nombre}' no coincide con el patrón")
+            continue
+        try:
+            nuevo = _armar_nombre(plantilla, coincidencia)
+        except KeyError as exc:
+            hay = ", ".join(f"<{g}>" for g in regex.groupindex) or "ninguno con nombre"
+            return ToolResult.err(
+                f"'nombre_nuevo' usa <{exc.args[0]}>, que el patrón no tiene. Grupos: {hay}", **vacio)
+        if not nuevo or any(c in nuevo for c in '/\\:*?"<>|'):
+            problemas.append(f"'{nombre}' quedaría con un nombre inválido: {nuevo!r}")
+            continue
+        final = fs.join(destino or fs.parent(ruta), nuevo)
+        # Los grupos primero: uno que se llame 'ruta' o 'nombre' no puede
+        # pisar los datos del archivo, que el resto del tool usa.
+        plan.append({
+            **{k: v or "" for k, v in coincidencia.groupdict().items()},
+            "ruta": ruta, "nombre": nombre, "nuevo": nuevo, "final": final,
+        })
+
+    # Sin distinguir mayúsculas: en Windows A.stl y a.stl son el mismo archivo.
+    vistos: dict[str, str] = {}
+    for paso in plan:
+        clave = paso["final"].replace("\\", "/").lower()
+        if clave in vistos:
+            problemas.append(f"'{vistos[clave]}' y '{paso['nombre']}' terminarían los dos como '{paso['nuevo']}'")
+        vistos[clave] = paso["nombre"]
+        mismo = clave == paso["ruta"].replace("\\", "/").lower()
+        if mismo and copiar:
+            problemas.append(f"'{paso['nombre']}' se copiaría sobre sí mismo: con 'copiar' hace falta otro nombre u otro 'destino'")
+        elif not mismo and fs.exists(paso["final"]):
+            if fs.is_dir(paso["final"]):
+                problemas.append(f"ya hay una carpeta en {paso['final']}")
+            elif not pisar:
+                problemas.append(f"ya existe {paso['final']} (marcá 'pisar' para reemplazarlo)")
+
+    if salteados:
+        ctx.log(f"{len(salteados)} no coinciden y quedan como están: "
+                + ", ".join(fs.basename(r) for r in salteados), "warning")
+    if problemas:
+        for p in problemas:
+            ctx.log(p, "error")
+        return ToolResult.err(
+            f"no se renombró ninguno: {problemas[0]}"
+            + (f" (y {len(problemas) - 1} problema(s) más, ver log)" if len(problemas) > 1 else ""),
+            **vacio,
+        )
+    if not plan:
+        return ToolResult.err("ningún archivo coincide con el patrón", **{**vacio, "salteados": salteados})
+
+    if destino:
+        fs.make_dirs(destino)
+    hechos = []
+    for paso in plan:
+        origen, final = paso["ruta"], paso["final"]
+        try:
+            if origen.replace("\\", "/").lower() == final.replace("\\", "/").lower() and not copiar:
+                # Mismo nombre, o sólo cambian mayúsculas: en Windows mover
+                # sobre sí mismo es un no-op o un error, según el caso.
+                if origen != final:
+                    final = fs.rename(origen, paso["nuevo"])
+            else:
+                if pisar and fs.exists(final):
+                    fs.remove_file(final)
+                final = fs.copy_file(origen, final) if copiar else fs.move(origen, final)
+        except PortError as exc:
+            return ToolResult.err(
+                f"falló en '{paso['nombre']}' después de {len(hechos)} de {len(plan)}: {exc}",
+                rutas=[h["final"] for h in hechos], cantidad=len(hechos),
+                variables=hechos, salteados=salteados, carpeta=fs.parent(hechos[0]["final"]) if hechos else "",
+            )
+        paso["final"] = final
+        ctx.log(f"{paso['nombre']} -> {final}")
+        hechos.append(paso)
+
+    variables = [{**{k: v for k, v in p.items() if k != "final"}, "ruta_nueva": p["final"]} for p in hechos]
+    return ToolResult.ok(
+        f"{len(hechos)} {'copiado(s)' if copiar else 'renombrado(s)'}",
+        rutas=[p["final"] for p in hechos], cantidad=len(hechos), variables=variables,
+        salteados=salteados, carpeta=fs.parent(hechos[0]["final"]),
+    )
 
 
 # ── buscar ──────────────────────────────────────────────────────────────
@@ -426,6 +652,7 @@ _TOOLS = (
     (COPIAR, _copiar),
     (ELIMINAR, _eliminar),
     (RENOMBRAR, _renombrar),
+    (RENOMBRAR_LOTE, _renombrar_lote),
     (BUSCAR, _buscar),
     (COMPARAR_CONTEO, _comparar_conteo),
 )
