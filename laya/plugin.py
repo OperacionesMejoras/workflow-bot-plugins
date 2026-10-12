@@ -97,7 +97,7 @@ MANIFEST = PluginManifest(
         Setting(
             MODELO, ParamType.STR, label="Modelo",
             choices=("", "multilingual", "english", "typed-decisions"),
-            doc="Vacío: el servidor elige según el idioma del texto (castellano → multilingual).",
+            doc="Vacío: el servidor elige según el idioma del texto (castellano: multilingual).",
         ),
     ),
 )

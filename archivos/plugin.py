@@ -184,7 +184,7 @@ RENOMBRAR_LOTE = ToolManifest(
         Param(
             "nombre_nuevo", required=True,
             doc="El nombre que queda, con los grupos entre <>: <caso>_<arcada>_<step>.stl . "
-            "<step:02> rellena con ceros a 2 dígitos (1 → 01). <1>, <2>… son los grupos por número. "
+            "<step:02> rellena con ceros a 2 dígitos (1 queda 01). <1>, <2>… son los grupos por número. "
             "Las variables del flujo van como siempre: {id_externo}_<arcada>.stl",
         ),
         Param(

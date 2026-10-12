@@ -115,3 +115,21 @@ def test_rutas_vacias_o_patron_roto_son_err():
     assert r.status == "err" and "vacío" in r.message
     r, _ = _correr(patron="(", nombre_nuevo="x.stl")
     assert r.status == "err" and "no es una expresión regular" in r.message
+
+
+def test_el_manifest_se_puede_imprimir_en_una_consola_de_windows():
+    """
+    La app valida un plugin corriendo `python -m backend.core plugins --json`
+    en otro proceso, y en Windows ese proceso imprime el catálogo en cp1252.
+    Un carácter que cp1252 no tiene —una flecha → en una ayuda— rompe el
+    print y el plugin entero "no carga". Le pasó a esta misma ayuda.
+    """
+    import json
+
+    plugin = build_plugin()
+    texto = json.dumps(
+        {"plugin": plugin.manifest.doc, "tools": [t.manifest.to_dict() for t in plugin.tools]},
+        ensure_ascii=False, default=str,
+    )
+    malos = sorted({c for c in texto if not c.encode("cp1252", "ignore")})
+    assert not malos, f"caracteres que la consola de Windows no imprime: {malos}"
