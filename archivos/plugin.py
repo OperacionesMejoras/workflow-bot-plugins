@@ -20,6 +20,7 @@ que el propio filesystem ya sabe.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 
 from backend.core import ports as port_names
@@ -39,7 +40,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="archivos",
     label="Archivos",
-    version="0.3.0",
+    version="0.4.0",
     doc="Mover, copiar, eliminar y renombrar archivos o carpetas, contra el port fs.",
     ports=(port_names.FS,),
 )
@@ -54,17 +55,53 @@ MOVER = ToolManifest(
     params=(
         Param("origen", ParamType.PATH, required=True),
         Param("destino", ParamType.PATH, required=True, doc="Ruta final, no la carpeta contenedora."),
+        Param(
+            "si_existe", ParamType.ENUM, default="adentro", choices=("adentro", "reemplazar", "error"),
+            doc="Qué hacer si 'destino' ya existe. 'adentro' (como siempre): si es una carpeta, lo "
+            "deja adentro de ella. 'reemplazar': BORRA lo que haya en 'destino' y deja el origen en "
+            "su lugar; para reprocesar un caso cuya salida anterior ya está. 'error': no mueve nada.",
+        ),
     ),
     outputs=(Output("ruta", ParamType.PATH),),
 )
 
 
+def _misma_o_adentro(ruta: str, carpeta: str) -> bool:
+    """
+    Si `ruta` es `carpeta` o cuelga de ella, sin distinguir mayúsculas ni
+    separador, y resolviendo los `..` (un flujo arma `{carpeta}/../{id}`).
+    """
+    r = posixpath.normpath(ruta.replace("\\", "/")).lower()
+    c = posixpath.normpath(carpeta.replace("\\", "/")).lower()
+    return r == c or r.startswith(c.rstrip("/") + "/")
+
+
 def _mover(ctx: ToolContext) -> ToolResult:
     fs = ctx.port(port_names.FS)
-    origen = ctx.params["origen"]
+    origen, destino = ctx.params["origen"], ctx.params["destino"]
+    si_existe = ctx.params.get("si_existe") or "adentro"
     if not fs.exists(origen):
         return ToolResult.err(f"no existe: {origen}")
-    final = fs.move(origen, ctx.params["destino"])
+
+    # Existe por el reproceso de un caso en BOT.1: el export de ToothFORM se
+    # mueve de la carpeta local a <caso>\<id>, y si esa carpeta ya estaba —de
+    # la corrida anterior— el mover la metía ADENTRO (<caso>\<id>\<id>), que
+    # es justo lo que después encontraba 'buscar', o fallaba la vez siguiente.
+    if fs.exists(destino) and si_existe != "adentro":
+        if si_existe == "error":
+            return ToolResult.err(f"ya existe {destino}; no se movió nada", error_kind="destino_existe")
+        if _misma_o_adentro(origen, destino):
+            return ToolResult.err(f"'{origen}' está adentro de '{destino}': reemplazarlo lo borraría")
+        try:
+            if fs.is_dir(destino):
+                fs.remove_tree(destino)
+            else:
+                fs.remove_file(destino)
+        except PortError as exc:
+            return ToolResult.err(f"no se pudo borrar {destino} para reemplazarlo: {exc}")
+        ctx.log(f"se borró {destino} para reemplazarlo", "warning")
+
+    final = fs.move(origen, destino)
     ctx.log(f"{origen} -> {final}")
     return ToolResult.ok(ruta=final)
 

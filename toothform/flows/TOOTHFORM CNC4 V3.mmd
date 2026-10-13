@@ -29,6 +29,11 @@
 %% abajo de {filesFolder}. Ojo si los STL originales están en una subcarpeta
 %% cuyo nombre lleva el id: ahí también quedarían afuera.
 %%
+%% "mover a carpeta del caso" va con si_existe=reemplazar: en un caso
+%% reprocesado {carpetaCaso}\{id_externo} ya existe, y sin esto el export
+%% nuevo quedaba ADENTRO del viejo ({id_externo}\{id_externo}). Borra el
+%% export anterior.
+%%
 %% Requisitos de la instalación: en boot.env, process_allowlist con el
 %% ejecutable (process_allowlist=Toothform, compara por nombre sin ruta ni
 %% extensión); el plugin toothform ≥ 0.2.0.
@@ -47,7 +52,7 @@ flowchart TD
     D_LOG{hubo log? § hubo_log}
     COMP_FILES["Comprobar cantidad § archivos.comparar_conteo | carpeta_a={toothformLogDir}\{id_externo}, carpeta_b={filesFolder}, etiqueta=toothform"]
     ERR_COMP["Error conteo § core.log | message=Faltan archivos exportados, level=error"]
-    MF["mover a carpeta del caso § archivos.mover | origen={toothformLogDir}\{id_externo}, destino={carpetaCaso}\{id_externo}"]
+    MF["mover a carpeta del caso § archivos.mover | origen={toothformLogDir}\{id_externo}, destino={carpetaCaso}\{id_externo}, si_existe=reemplazar"]
     N1003["NOLOCO - Apto impreison § connections.llamar | connection=Apto impresion"]
     N1000["copiar archivo § archivos.copiar | origen={toothformLogDir}\{checkLogResult.log_file}, destino={carpetaCaso}\{checkLogResult.log_file}"]
     N1004["Revision Impresion digital § connections.llamar | connection=Revision impresion digital"]
