@@ -112,7 +112,7 @@ MAX_SIMULTANEOS = "toothformMaxSimultaneos"
 MANIFEST = PluginManifest(
     name="toothform",
     label="ToothFORM",
-    version="0.8.0",
+    version="0.9.0",
     doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana—, leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
     ports=(port_names.PROCESS, port_names.FS, port_names.CLOCK, port_names.WINDOW),
     settings=(
@@ -746,6 +746,22 @@ def _exportar_en(
             ctx.log(f"no se pudo listar {carpeta} ({exc}): va entera, sin tandas", "warning")
         if fuentes is not None and not fuentes:
             return ToolResult.err(f"no hay ningún .stl en {carpeta}")
+        # Una carpeta con `-gum.stl` es una SALIDA de ToothFORM, no la original:
+        # el STL exportado lleva el mismo nombre que el de origen, así que una
+        # búsqueda recursiva sobre el caso la encuentra igual. Medido el
+        # 13/10/2026 con BZ219: darle un STL ya exportado lo mata a los 10 s con
+        # 0xC0000005 en Core.dll, sin log. Se dice acá en vez de dejarlo caer.
+        derivados = [
+            fs.basename(ruta) for ruta, _bytes in fuentes or []
+            if fs.basename(ruta).lower().endswith("-gum.stl")
+        ]
+        if derivados:
+            return ToolResult.err(
+                f"{carpeta} ya es una salida de ToothFORM (tiene {len(derivados)} '-gum.stl', ej. "
+                f"{derivados[0]}): con un STL ya exportado se cae con 0xC0000005. Hay que darle la "
+                "carpeta con los STL originales",
+                error_kind="entrada_exportada",
+            )
 
     limite = int((ctx.params["max_mb_por_tanda"] or 0) * _MB)
     # Una carpeta con acentos no se le puede pasar tal cual: se copia como si

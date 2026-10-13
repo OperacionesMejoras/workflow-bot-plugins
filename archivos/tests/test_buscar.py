@@ -289,3 +289,78 @@ def test_contra_un_nucleo_sin_max_depth_sigue_andando_y_avisa():
     assert r.status == "ok"
     assert r.outputs["carpeta"] == NUEVA   # mismo resultado que por el camino rápido
     assert any(nivel == "warning" and "core#33" in m for nivel, m in registro), registro
+
+
+# ── excluir_carpeta: un caso que ya se exportó una vez ─────────────────────
+
+TERMINADOS = "C:/casos-terminados"
+# Lo que dejaba una corrida anterior: ToothFORM exporta con el mismo nombre que
+# el original, en <caso>\<id>. La carpeta del caso también lleva el id.
+REPROCESADO = {
+    f"{TERMINADOS}/BZ219_Perez Rocio/Perez Rocio 1.0 stl/BZ219-L01-A.stl": "",
+    f"{TERMINADOS}/BZ219_Perez Rocio/Perez Rocio 1.0 stl/BZ219-U01-A.stl": "",
+    f"{TERMINADOS}/BZ219_Perez Rocio/BZ219/BZ219-L01-A.stl": "",
+    f"{TERMINADOS}/BZ219_Perez Rocio/BZ219/BZ219-L01-A-gum.stl": "",
+    f"{TERMINADOS}/BZ219_Perez Rocio/BZ219/BZ219-U01-A.stl": "",
+}
+PATRON_PRODUCCION = r"^[A-Z][A-Z]\d\d\d-[LU]\d\d-[A-Z]\.stl$"
+
+
+def _buscar_reprocesado(archivos, log=None, **params):
+    reg = ToolRegistry(adapters={"fs": FakeFs(files=archivos)})
+    reg._add_plugin("archivos", "plugins.archivos:PLUGIN", build_plugin())
+    anotar = (lambda m, level="info": log(m)) if log else (lambda *_a, **_k: None)
+
+    def factory(declaracion, ports=None):
+        declarados, extras = declaracion.split_params(params, {})
+        return ToolContext(
+            run_id="run-test", case_id="BZ219", params=declarados, extras=extras,
+            config={}, context={}, log=anotar, ports=ports or {},
+        )
+
+    return reg.execute("archivos.buscar", factory)
+
+
+def test_sin_excluir_carpeta_una_segunda_corrida_encuentra_la_salida_de_la_primera():
+    # Lo que pasaba en BOT.1: la búsqueda recursiva junta originales y exportados.
+    r = _buscar_reprocesado(REPROCESADO, carpeta=TERMINADOS, subcarpeta="BZ219", patron=PATRON_PRODUCCION)
+    assert r.status == "ok"
+    assert r.outputs["cantidad"] == 4
+    assert len(r.outputs["carpetas"]) == 2
+
+
+def test_excluir_carpeta_deja_afuera_la_salida_y_no_la_carpeta_del_caso():
+    # La carpeta del caso (la de 'subcarpeta') también lleva 'BZ219': no cuenta.
+    mensajes = []
+    r = _buscar_reprocesado(
+        REPROCESADO, log=mensajes.append,
+        carpeta=TERMINADOS, subcarpeta="BZ219", patron=PATRON_PRODUCCION, excluir_carpeta="bz219",
+    )
+    assert r.status == "ok", r.message
+    assert sorted(pathlib.PurePosixPath(p).name for p in r.outputs["rutas"]) == [
+        "BZ219-L01-A.stl", "BZ219-U01-A.stl",
+    ]
+    assert r.outputs["carpeta"] == f"{TERMINADOS}/BZ219_Perez Rocio/Perez Rocio 1.0 stl"
+    assert r.outputs["carpetas"] == [r.outputs["carpeta"]]
+    assert any("2 quedaron afuera" in m for m in mensajes)
+
+
+def test_excluir_carpeta_que_deja_todo_afuera_lo_dice_en_el_error():
+    solo_salida = {k: v for k, v in REPROCESADO.items() if "/BZ219/" in k}
+    r = _buscar_reprocesado(
+        solo_salida, carpeta=TERMINADOS, subcarpeta="BZ219", patron=PATRON_PRODUCCION, excluir_carpeta="BZ219",
+    )
+    assert r.status == "err"
+    assert "quedaron afuera por 'excluir_carpeta'" in r.message
+    assert r.outputs["rutas"] == []
+
+
+def test_excluir_carpeta_con_rutas_de_windows():
+    # El adapter real devuelve '\'; la carpeta base puede venir con '\' del flujo.
+    archivos = {k.replace("/", "\\"): v for k, v in REPROCESADO.items()}
+    r = _buscar_reprocesado(
+        archivos, carpeta=TERMINADOS.replace("/", "\\"), subcarpeta="BZ219",
+        patron=PATRON_PRODUCCION, excluir_carpeta="BZ219",
+    )
+    assert r.status == "ok", r.message
+    assert r.outputs["cantidad"] == 2

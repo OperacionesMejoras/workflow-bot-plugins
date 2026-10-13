@@ -39,7 +39,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="archivos",
     label="Archivos",
-    version="0.2.0",
+    version="0.3.0",
     doc="Mover, copiar, eliminar y renombrar archivos o carpetas, contra el port fs.",
     ports=(port_names.FS,),
 )
@@ -430,6 +430,14 @@ BUSCAR = ToolManifest(
         ),
         Param("etiqueta", doc=_DOC_ETIQUETA),
         Param("patron", doc=_DOC_PATRON),
+        Param(
+            "excluir_carpeta",
+            doc="Ej.: {id_externo}. Deja afuera lo que esté adentro de una carpeta cuyo nombre contenga "
+            "esto —sin distinguir mayúsculas—, contando sólo las carpetas de abajo de donde se busca "
+            "(la de 'subcarpeta' no cuenta). Para cuando lo que se busca y lo que un paso posterior "
+            "deja en el mismo caso llevan el mismo nombre: sin esto, una segunda corrida encuentra "
+            "la salida de la primera.",
+        ),
     ),
     outputs=(
         Output("rutas", ParamType.JSON, doc="Lista de rutas encontradas."),
@@ -549,8 +557,34 @@ def _buscar(ctx: ToolContext) -> ToolResult:
 
     rutas = [e.path for e in fs.walk(carpeta) if not e.is_dir and coincide(e.name)]
     ctx.log(f"{len(rutas)} archivo(s) con {criterio} en {carpeta}")
+
+    # Existe por ToothFORM: el STL que exporta se llama igual que el original
+    # y queda en <caso>\<id>, así que una segunda corrida sobre el mismo caso
+    # encontraba su propia salida y se la daba de entrada —y ToothFORM se cae
+    # con un STL ya exportado (0xC0000005, sin log)—. Medido el 13/10/2026 en
+    # BOT.1: BZ219 daba 76 archivos y 'carpeta' = BZ219\BZ219; con esto, los
+    # 44 originales en su carpeta.
+    excluidos = 0
+    if excluir := (ctx.params.get("excluir_carpeta") or "").strip().lower():
+        base = carpeta.replace("\\", "/").rstrip("/").lower()
+
+        def afuera(ruta: str) -> bool:
+            # Sólo las carpetas de abajo de donde se busca: la del caso suele
+            # llevar el mismo texto y excluirla sería excluir todo.
+            relativa = fs.parent(ruta).replace("\\", "/")
+            if relativa.lower().startswith(base):
+                relativa = relativa[len(base):]
+            return any(excluir in parte.lower() for parte in relativa.split("/") if parte)
+
+        quedan = [r for r in rutas if not afuera(r)]
+        excluidos = len(rutas) - len(quedan)
+        if excluidos:
+            ctx.log(f"{excluidos} quedaron afuera por estar en una carpeta con '{excluir}'")
+        rutas = quedan
+
     if not rutas:
-        return ToolResult.err(f"ningún archivo con {criterio} en {carpeta}", **_SIN_NADA)
+        motivo = f" ({excluidos} quedaron afuera por 'excluir_carpeta')" if excluidos else ""
+        return ToolResult.err(f"ningún archivo con {criterio} en {carpeta}{motivo}", **_SIN_NADA)
 
     # La carpeta de cada resultado, no la que se buscó: `walk` es recursivo, así
     # que los archivos pueden estar en una subcarpeta —o en varias—. Un tool que

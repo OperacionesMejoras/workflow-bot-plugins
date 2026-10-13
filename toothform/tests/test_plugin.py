@@ -582,6 +582,23 @@ def test_exportar_es_err_si_la_carpeta_no_tiene_ningun_stl():
     assert process.calls == []
 
 
+def test_exportar_no_corre_toothform_sobre_una_carpeta_que_ya_es_su_salida():
+    """
+    Un caso reprocesado: `buscar` encontraba <caso>\\<id>, la salida de la
+    corrida anterior, y ToothFORM se caía con 0xC0000005 a los 10 s sin log al
+    recibir un STL ya exportado (BZ219, 13/10/2026). Se corta antes.
+    """
+    fs = FsConMtimes(
+        files={f"{STL}/QATF001-L01-A.stl": "x", f"{STL}/QATF001-L01-A-gum.stl": "x"}, dirs=(SALIDA,),
+    )
+    resultado, _fs, process = _exportar(fs=fs)
+
+    assert resultado.status == "err"
+    assert resultado.error_kind == "entrada_exportada"
+    assert "QATF001-L01-A-gum.stl" in resultado.message
+    assert process.calls == []
+
+
 def test_si_la_carpeta_no_se_deja_listar_va_entera_como_antes_de_las_tandas():
     """Un share que no contesta no puede frenar un export que hasta ayer andaba."""
 
