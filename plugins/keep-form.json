@@ -1,0 +1,14 @@
+{
+  "name": "keep-form",
+  "description": "Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot (geometría de Enkukador).",
+  "source": "workflow-bot-plugin-keep-form",
+  "path": "keep_form",
+  "ports": [
+    "fs"
+  ],
+  "maintainer": "OperacionesMejoras",
+  "repo_url": "https://github.com/OperacionesMejoras/workflow-bot-plugins",
+  "compatible_core": ">=0.3.0b4",
+  "compatible_runtime": "v0.4.2-beta.1",
+  "license": "MIT"
+}
