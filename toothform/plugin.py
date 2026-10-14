@@ -39,6 +39,18 @@ Tres tools, y el orden en que aparecieron explica por qué hay tres:
   alguna ruta no es ASCII el tool copia los STL a `carpeta_ascii`, hace
   exportar ahí y después mueve lo exportado a la salida de verdad.
 
+- `enkukador` hace lo mismo que `exportar` con Enkukador
+  (OperacionesMejoras/Enkukador-keepsmiling, `--producto toothform`), que
+  reconstruye la salida de ToothFORM —pieza hueca con las referencias del
+  robot, QR, texto, `-gum.stl` y `-tooth.ply`— y deja un log con el mismo
+  formato. Por eso reusa la lectura del log y la comprobación en disco de
+  `exportar`, y devuelve las mismas salidas: en un flujo se cambia el nodo y
+  nada más. Lo que no hereda es lo que existe por las caídas de Toothform.exe
+  (tandas, reintentos, carpeta ASCII): Enkukador es Python, abre cualquier
+  ruta y recibe los archivos sueltos sin copiarlos. Lo que sí cambia es la
+  comprobación: Enkukador escribe `-gum.stl` aunque el modelo falle, así que
+  cuenta sólo `<modelo>.stl`.
+
 - `add_qr` usa `window` (v0.3.0-beta.3, issue #12 del núcleo): encuentra la
   ventana de ToothFORM y clickea "Export". Es el camino para el release
   anterior (20260123), que no tiene modo cmd; ahí el operador deja el STL
@@ -112,8 +124,8 @@ MAX_SIMULTANEOS = "toothformMaxSimultaneos"
 MANIFEST = PluginManifest(
     name="toothform",
     label="ToothFORM",
-    version="0.9.0",
-    doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana—, leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
+    version="0.10.0",
+    doc="Exportar (QR + placa base) con la app ToothFORM —por línea de comandos o clickeando su ventana— o con Enkukador, que hace lo mismo sin ToothFORM; leer su log de resultado, y el camino fácil de ToothCAM (mover a una carpeta vigilada y esperar el log).",
     ports=(port_names.PROCESS, port_names.FS, port_names.CLOCK, port_names.WINDOW),
     settings=(
         Setting(
@@ -609,13 +621,19 @@ def _bajo(ruta: str, excluidos: list[str]) -> bool:
     return any(ruta == x or ruta.startswith(x + "/") for x in excluidos)
 
 
-def _faltan_en_salida(fs, salida: str, modelos: list[str], entradas: list[str]) -> list[str]:
+def _faltan_en_salida(
+    fs, salida: str, modelos: list[str], entradas: list[str], exacto: bool = False,
+) -> list[str]:
     """
     Los `modelos` que no tienen un STL en `salida`, mirando el disco: lo que
     ToothFORM diga en el log no cuenta. `entradas` son los STL (o la carpeta)
     que se le dieron: en el flujo la salida es la carpeta de arriba de la de
     entrada, así que los STL de origen están adentro y llevan los mismos
     nombres; si contaran, nunca faltaría nada.
+
+    `exacto` cuenta sólo `<modelo>.stl`: Enkukador escribe `-gum.stl` y
+    `-tooth.ply` también para un modelo que falló, y por prefijo ésos lo
+    darían por escrito.
     """
     excluidos = [_normal(x) for x in entradas]
     escritos = [
@@ -623,10 +641,16 @@ def _faltan_en_salida(fs, salida: str, modelos: list[str], entradas: list[str]) 
         if not e.is_dir and e.name.lower().endswith(".stl")
         and not _es_de_entrada(e.path) and not _bajo(e.path, excluidos)
     ]
+    if exacto:
+        nombres = {n.lower() for n in escritos}
+        return [m for m in modelos if f"{m}.stl".lower() not in nombres]
     return [m for m in modelos if not any(_es_del_modelo(n, m) for n in escritos)]
 
 
-def _comprobar(ctx: ToolContext, fs, salida: str, entradas: list[str], resultado: ToolResult) -> ToolResult:
+def _comprobar(
+    ctx: ToolContext, fs, salida: str, entradas: list[str], resultado: ToolResult,
+    exacto: bool = False, programa: str = "ToothFORM",
+) -> ToolResult:
     """
     Cuenta en disco, al terminar, cuántos de los modelos pedidos están en la
     salida, y agrega `esperados`, `escritos` y `faltantes` al resultado.
@@ -643,7 +667,7 @@ def _comprobar(ctx: ToolContext, fs, salida: str, entradas: list[str], resultado
     if not modelos:
         return resultado  # no se pudo listar la entrada: no hay contra qué contar
     try:
-        faltantes = _faltan_en_salida(fs, salida, modelos, entradas)
+        faltantes = _faltan_en_salida(fs, salida, modelos, entradas, exacto)
     except PortError as exc:
         ctx.log(f"no se pudo comprobar la salida {salida} ({exc}): se confía en el log", "warning")
         return resultado
@@ -652,7 +676,7 @@ def _comprobar(ctx: ToolContext, fs, salida: str, entradas: list[str], resultado
     ctx.log(f"salida comprobada en disco: {escritos} de {len(modelos)} STL", "warning" if faltantes else "info")
     if faltantes and resultado.status == STATUS_OK:
         return ToolResult.err(
-            f"ToothFORM dio el export por bueno pero en {salida} hay {escritos} de {len(modelos)} STL; "
+            f"{programa} dio el export por bueno pero en {salida} hay {escritos} de {len(modelos)} STL; "
             f"faltan: {', '.join(faltantes)}",
             error_kind="faltan_archivos", **outputs,
         )
@@ -722,6 +746,28 @@ def _traer(ctx: ToolContext, fs, trabajo: str, salida: str, resultado: ToolResul
     return replace(resultado, outputs=outputs)
 
 
+def _ya_exportada(fs, carpeta: str, fuentes: list | None) -> ToolResult | None:
+    """
+    Una carpeta con `-gum.stl` es una SALIDA de ToothFORM (o de Enkukador), no
+    la original: el STL exportado lleva el mismo nombre que el de origen, así
+    que una búsqueda recursiva sobre el caso la encuentra igual. Medido el
+    13/10/2026 con BZ219: darle un STL ya exportado mata a ToothFORM a los
+    10 s con 0xC0000005 en Core.dll, sin log. Se dice acá en vez de dejarlo caer.
+    """
+    derivados = [
+        fs.basename(ruta) for ruta, _bytes in fuentes or []
+        if fs.basename(ruta).lower().endswith("-gum.stl")
+    ]
+    if not derivados:
+        return None
+    return ToolResult.err(
+        f"{carpeta} ya es una salida de ToothFORM (tiene {len(derivados)} '-gum.stl', ej. "
+        f"{derivados[0]}): con un STL ya exportado se cae con 0xC0000005. Hay que darle la "
+        "carpeta con los STL originales",
+        error_kind="entrada_exportada",
+    )
+
+
 def _exportar_en(
     ctx: ToolContext, fs, process, ejecutable: str, carpeta: str, archivos: list, salida: str, tipo: str,
 ) -> ToolResult:
@@ -746,22 +792,8 @@ def _exportar_en(
             ctx.log(f"no se pudo listar {carpeta} ({exc}): va entera, sin tandas", "warning")
         if fuentes is not None and not fuentes:
             return ToolResult.err(f"no hay ningún .stl en {carpeta}")
-        # Una carpeta con `-gum.stl` es una SALIDA de ToothFORM, no la original:
-        # el STL exportado lleva el mismo nombre que el de origen, así que una
-        # búsqueda recursiva sobre el caso la encuentra igual. Medido el
-        # 13/10/2026 con BZ219: darle un STL ya exportado lo mata a los 10 s con
-        # 0xC0000005 en Core.dll, sin log. Se dice acá en vez de dejarlo caer.
-        derivados = [
-            fs.basename(ruta) for ruta, _bytes in fuentes or []
-            if fs.basename(ruta).lower().endswith("-gum.stl")
-        ]
-        if derivados:
-            return ToolResult.err(
-                f"{carpeta} ya es una salida de ToothFORM (tiene {len(derivados)} '-gum.stl', ej. "
-                f"{derivados[0]}): con un STL ya exportado se cae con 0xC0000005. Hay que darle la "
-                "carpeta con los STL originales",
-                error_kind="entrada_exportada",
-            )
+        if (ya := _ya_exportada(fs, carpeta, fuentes)) is not None:
+            return ya
 
     limite = int((ctx.params["max_mb_por_tanda"] or 0) * _MB)
     # Una carpeta con acentos no se le puede pasar tal cual: se copia como si
@@ -904,6 +936,173 @@ def _exportar_en(
     if len(grupos) > 1:
         ctx.log(f"{len(grupos)} tandas: {corrido.exitosos} exportados, {corrido.fallidos} fallidos")
     return corrido.ok()
+
+
+# ── enkukador ───────────────────────────────────────────────────────────
+
+# Lo que Enkukador toma de una carpeta (enkukador/cli.py, EXTENSIONES): el log
+# trae una línea por cada uno, así que son los modelos que se esperan.
+_EXT_ENKUKADOR = (".stl", ".obj", ".ply", ".off")
+# Enkukador sale con 0 si exportaron todos y con 1 si alguno falló; las dos
+# veces deja el log. Sin log, un 1 es una excepción de Python (falta una
+# librería, una ruta mala) y lo que pasó está en stderr.
+_TERMINA_ENKUKADOR = (0, 1)
+
+ENKUKADOR = ToolManifest(
+    id="toothform.enkukador",
+    label="exportar con Enkukador",
+    category="TOOTHFORM",
+    doc=(
+        "Como 'exportar (línea de comandos)', pero con Enkukador en vez de Toothform.exe: "
+        "por cada modelo deja la pieza hueca con las referencias del robot, el QR y el texto, "
+        "más -gum.stl y -tooth.ply, en <salida>\\<ID>, y un log con el mismo formato. Las "
+        "salidas son las mismas que las de 'exportar', así que en un flujo alcanza con cambiar "
+        "el nodo. 'Enkukador' tiene que estar en process_allowlist. Los parámetros de "
+        "ParameterSettings se pasan como params extra (ej. ShellThickness=2.0); Enkukador usa "
+        "ShellThickness, BottomPlaneThickness, LimitR, LimitH, QrSize, Radius1 y Radius2."
+    ),
+    params=(
+        Param(
+            "instalacion", ParamType.PATH, required=True,
+            doc="Carpeta donde se instaló Enkukador, la que tiene runtime\\ y app\\. Con el "
+            "instalador: C:\\Users\\<usuario>\\AppData\\Local\\Programs\\Enkukador.",
+        ),
+        Param(
+            "ejecutable", ParamType.PATH, default="",
+            doc="Vacío: <instalacion>\\runtime\\Enkukador.exe. Sólo para correrlo desde otro "
+            "Python (ej. el .venv de un clon del repo, con 'instalacion' en la raíz del clon).",
+        ),
+        Param("carpeta", ParamType.PATH, default="", doc="Carpeta con los modelos: TODOS los .stl/.obj/.ply/.off de adentro. Alternativa a 'archivos'."),
+        Param("archivos", ParamType.JSON, default=[], doc="Alternativa a 'carpeta': sólo estos archivos. A diferencia de ToothFORM, no se copian a ningún lado."),
+        Param("salida", ParamType.PATH, required=True, doc="Carpeta de salida: ahí caen el log, el JSON y <ID>\\ con el export."),
+        Param(
+            "timeout", ParamType.FLOAT, default=1800.0,
+            doc="Segundos máximos para todo el caso. Cada modelo tarda unos segundos (vaciado y "
+            "referencias).",
+        ),
+        Param(
+            "timeout_turno", ParamType.FLOAT, default=0.0,
+            doc="Igual que en 'exportar': cuánto esperar un lugar si ya corren "
+            "'toothformMaxSimultaneos' exportaciones. 0 = el mismo 'timeout'.",
+        ),
+    ),
+    extra_params=True,
+    outputs=EXPORTAR.outputs,
+)
+
+
+def _enkukador(ctx: ToolContext) -> ToolResult:
+    try:
+        return _enkukador_comprobado(ctx)
+    except PortError as exc:
+        return ToolResult.err(f"ruta o permiso: {exc}", error_kind="ruta")
+
+
+def _enkukador_comprobado(ctx: ToolContext) -> ToolResult:
+    fs = ctx.port(port_names.FS)
+    process = ctx.port(port_names.PROCESS)
+    instalacion, carpeta, salida = ctx.params["instalacion"], ctx.params["carpeta"], ctx.params["salida"]
+    archivos = ctx.params.get("archivos") or []
+    ejecutable = ctx.params.get("ejecutable") or fs.join(instalacion, "runtime", "Enkukador.exe")
+
+    desconocidos = sorted(set(ctx.extras) - set(_PARAMETROS_DEFAULT))
+    if desconocidos:
+        return ToolResult.err(
+            f"parámetros que ToothFORM no conoce: {', '.join(desconocidos)}. "
+            f"Válidos: {', '.join(_PARAMETROS_DEFAULT)}"
+        )
+    if bool(carpeta) == bool(archivos):
+        return ToolResult.err(
+            "hace falta 'carpeta' (todos los modelos de adentro) o 'archivos' (sólo ésos), no las dos "
+            "ni ninguna" if carpeta else "hace falta 'carpeta' o 'archivos'"
+        )
+    if not fs.exists(ejecutable):
+        return ToolResult.err(f"no está Enkukador en {ejecutable}", error_kind="ruta")
+    # El instalador deja el paquete en <instalacion>\app; un clon del repo, en la raíz.
+    app = fs.join(instalacion, "app")
+    cwd = app if fs.exists(fs.join(app, "enkukador")) else instalacion
+    if not fs.exists(fs.join(cwd, "enkukador")):
+        return ToolResult.err(
+            f"en {instalacion} no está el programa (ni app\\enkukador ni enkukador)", error_kind="ruta",
+        )
+
+    if archivos:
+        faltan = [a for a in archivos if not fs.exists(a) or fs.is_dir(a)]
+        if faltan:
+            return ToolResult.err(f"no existen estos archivos: {', '.join(faltan)}")
+        fuentes = [(a, _tamano(fs, a)) for a in archivos]
+    else:
+        if not fs.exists(carpeta) or not fs.is_dir(carpeta):
+            return ToolResult.err(f"no existe la carpeta con los modelos: {carpeta}")
+        fuentes = [
+            (e.path, e.size) for e in fs.list_dir(carpeta)
+            if not e.is_dir and e.name.lower().endswith(_EXT_ENKUKADOR)
+        ]
+        if not fuentes:
+            return ToolResult.err(f"no hay ningún modelo (.stl, .obj, .ply, .off) en {carpeta}")
+        if (ya := _ya_exportada(fs, carpeta, fuentes)) is not None:
+            return ya
+
+    fs.make_dirs(salida)
+    ruta_config = fs.join(salida, f"enkukador-{_nombre_ascii(ctx.case_id)}.json")
+    # Enkukador sólo lee ParameterSettings; el JSON lleva lo mismo que el de
+    # ToothFORM para que se pueda comparar una corrida con la otra.
+    fs.write_text(ruta_config, json.dumps({
+        "ParameterSettings": {**_PARAMETROS_DEFAULT, **{k: str(v) for k, v in ctx.extras.items()}},
+    }, indent=2))
+
+    entradas = list(archivos) if archivos else [carpeta]
+    corrido = _Acumulado(config=ruta_config, tandas=1)
+    corrido.modelos = [_sin_extension(fs.basename(ruta)) for ruta, _bytes in fuentes]
+    corrido.vistos = {e.name for e in _logs(fs, salida)}
+    comando = [
+        ejecutable, "-m", "enkukador", *entradas,
+        "--producto", "toothform", "--salida", salida, "--config", ruta_config,
+    ]
+    timeout = ctx.params["timeout"]
+
+    maximo = int(ctx.config(MAX_SIMULTANEOS) or 0)
+    if maximo > 0:
+        espera = ctx.params.get("timeout_turno") or timeout
+        if _TURNOS.en_curso >= maximo:
+            ctx.log(f"esperando turno: {_TURNOS.en_curso} exportaciones en curso (máximo {maximo})")
+        if not _TURNOS.tomar(maximo, espera):
+            return ToolResult.err(
+                f"no hubo turno para exportar en {espera:g} s: {_TURNOS.en_curso} exportaciones en curso "
+                f"(máximo {maximo}, setting {MAX_SIMULTANEOS})",
+                error_kind="sin_turno", **corrido.salidas,
+            )
+    try:
+        ctx.log(f"Enkukador: {len(fuentes)} modelo(s) de {', '.join(entradas)} a {salida}")
+        corrida = process.run(comando, cwd=cwd, timeout=timeout)
+    finally:
+        if maximo > 0:
+            _TURNOS.soltar()
+
+    corrido.exit_code = corrida.exit_code
+    corrido.stdout, corrido.stderr = corrida.stdout or "", corrida.stderr or ""
+    if corrida.timed_out:
+        return corrido.err(f"Enkukador no terminó en {timeout:g} s", "timeout")
+
+    nuevos = [e for e in _logs(fs, salida) if e.name not in corrido.vistos]
+    if not nuevos:
+        ultima = next((l.strip() for l in reversed(corrido.stderr.splitlines()) if l.strip()), "")
+        return corrido.err(
+            f"Enkukador terminó (exit {corrida.exit_code}) sin dejar un log"
+            + (f": {ultima}" if ultima else "; no escribió nada por stderr"),
+            "sin_log" if corrida.exit_code in _TERMINA_ENKUKADOR else "crash",
+        )
+    reciente = max(nuevos, key=lambda e: e.modified_at)
+    texto = fs.read_text(reciente.path, encoding="utf-8")
+    anduvo, porque = corrido.sumar(fs, salida, reciente.name, texto)
+    ctx.log(f"{reciente.name}: {_primera(texto)[:160]}")
+    if _PATRON_TOTAL.search(texto) is None:
+        return corrido.err(
+            f"Enkukador se cortó exportando (exit {corrida.exit_code}): {reciente.name} quedó sin "
+            "la línea de totales" + _sin_procesar(corrido, None), "crash",
+        )
+    resultado = corrido.ok() if anduvo else corrido.err(porque, "modelo_fallido")
+    return _comprobar(ctx, fs, salida, entradas, resultado, exacto=True, programa="Enkukador")
 
 
 # ── add_qr ──────────────────────────────────────────────────────────────
@@ -1300,6 +1499,7 @@ def _toothcam_enviar(ctx: ToolContext) -> ToolResult:
 
 _TOOLS = (
     (EXPORTAR, _exportar),
+    (ENKUKADOR, _enkukador),
     (ADD_QR, _add_qr),
     (CHECK_LOG, _check_log),
     (TOOTHCAM_ENVIAR, _toothcam_enviar),
