@@ -112,8 +112,9 @@ def test_un_modelo_roto_no_frena_el_resto_y_es_err_con_su_motivo(tmp_path, arcad
     o = r.outputs
     assert o["exportados"] == ["AB123-L05-A"] and o["faltantes"] == ["AB123-U05-A"]
     assert o["modelos_fallidos"][0]["modelo"] == "AB123-U05-A"
-    assert o["modelos_fallidos"][0]["motivo"].startswith("Failed to hollow (")
-    assert "AB123-U05-A    Failed to hollow" in o["log_texto"]
+    # Un archivo que no es una malla es "Failed to preprocess", como en ToothFORM.
+    assert o["modelos_fallidos"][0]["motivo"].startswith("Failed to preprocess (")
+    assert "AB123-U05-A    Failed to preprocess" in o["log_texto"]
     assert (tmp_path / "salida" / "AB123" / "AB123-L05-A.stl").exists()
     # El que falló no deja MatA, como ToothFORM, que lo escribe por modelo exportado.
     assert not (tmp_path / "salida" / "AB123" / "AB123-U05-A-MatA.txt").exists()
@@ -282,3 +283,43 @@ def test_paralelo_da_lo_mismo_y_en_el_orden_de_la_entrada(tmp_path, arcada_stl):
     import re
 
     assert sorted(m.split(" ")[0] for m in logs if re.match(r"\d+/\d+ ", m)) == ["1/3", "2/3", "3/3"]
+
+
+def test_si_no_se_puede_vaciar_sale_maciza_como_toothform(tmp_path, arcada_stl, monkeypatch):
+    """'Fail to hollow, changed to solid': ToothFORM la exporta igual y su
+    documento dice que no hace falta corregir nada."""
+    import trimesh
+
+    from plugins.keep_form.enkukador import hueco
+
+    def sin_cavidad(*_a, **_k):
+        raise RuntimeError("la cavidad no cerró")
+
+    monkeypatch.setattr(hueco, "cavidad", sin_cavidad)
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
+    r = _exportar(LocalFsAdapter(root=tmp_path), carpeta="caso", salida="salida")
+
+    assert r.status == "ok", r.message
+    assert r.outputs["exportados"] == ["AB123-L05-A"]
+    assert "AB123-L05-A    Fail to hollow, changed to solid" in r.outputs["log_texto"]
+    hecho = tmp_path / "salida" / "AB123"
+    assert (hecho / "AB123-L05-A-MatA.txt").exists()
+    maciza = trimesh.load(hecho / "AB123-L05-A.stl")
+    assert maciza.is_watertight and maciza.body_count == 1
+
+
+def test_si_fallan_la_placa_o_el_qr_es_failed_to_merge(tmp_path, arcada_stl, monkeypatch):
+    from plugins.keep_form.enkukador import toothform
+
+    def qr_roto(*_a, **_k):
+        raise RuntimeError("no se pudo armar el QR")
+
+    monkeypatch.setattr(toothform, "_qr_modulos", qr_roto)
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
+    r = _exportar(LocalFsAdapter(root=tmp_path), carpeta="caso", salida="salida")
+
+    assert r.status == "err" and r.error_kind == "modelo_fallido"
+    assert r.outputs["modelos_fallidos"][0]["motivo"].startswith("Failed to merge (")
+    assert not (tmp_path / "salida" / "AB123" / "AB123-L05-A.stl").exists()

@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.3",
+    version="0.1.4",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -62,7 +62,6 @@ _PARAMETROS_TOOTHFORM = (
     "ShellThickness", "BottomPlaneThickness", "LimitR", "LimitH", "QrSize", "Radius1", "Radius2",
 )
 _EXT_MODELOS = (".stl", ".obj", ".ply", ".off")
-_EXPORTO = "Export successfully"
 # Lo que ToothFORM deja en <modelo>-MatA.txt: dos identidades 4x4 por filas,
 # CRLF. Revisados los 1492 de "Casos Terminados 2026" (14/10/2026): todos
 # iguales byte a byte, sin importar caso, maxilar ni A/B, y no describen la
@@ -247,25 +246,32 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             return stem, caso, "Cancelled", "se canceló el run antes de procesarlo"
         motivo = ""
         try:
-            malla = trimesh.load(io.BytesIO(fs.read_bytes(ruta)), file_type=ext.lower(), force="mesh")
+            datos_stl = fs.read_bytes(ruta)
+            try:
+                malla = trimesh.load(io.BytesIO(datos_stl), file_type=ext.lower(), force="mesh")
+            except Exception as exc:  # noqa: BLE001
+                raise tf.FallaToothform(tf.FALLO_PREPROCESO, f"no se pudo leer: {type(exc).__name__}: {exc}") from exc
             if not isinstance(malla, trimesh.Trimesh) or len(malla.faces) == 0:
-                raise ValueError("no es una malla o está vacía")
+                raise tf.FallaToothform(tf.FALLO_PREPROCESO, "no es una malla o está vacía")
             resultado = tf.generar(malla, caso, modelo or stem, p)
             estado = resultado.estado
-            if estado == _EXPORTO:
+            if estado in tf.EXPORTADOS:
                 resultado.pieza = _una_pieza(ctx, stem, resultado.pieza)
             destino = fs.join(salida, caso)
             fs.make_dirs(destino)
             for archivo, datos in tf.exportar(resultado, stem).items():
                 fs.write_bytes(fs.join(destino, archivo), datos)
-            if estado == _EXPORTO:
+            if estado in tf.EXPORTADOS:
                 fs.write_bytes(fs.join(destino, f"{stem}-MatA.txt"), _MATA)
             for aviso in resultado.avisos:
                 ctx.log(f"{stem}: {aviso}", "warning")
         except PortError:
             raise
+        except tf.FallaToothform as exc:  # con el nombre que usa ToothFORM en su log
+            estado, motivo = exc.estado, exc.detalle
+            ctx.log(f"{stem}: {estado}: {motivo}", "error")
         except Exception as exc:  # un modelo roto no frena el caso, como en ToothFORM
-            estado, motivo = "Failed to hollow", f"{type(exc).__name__}: {exc}"
+            estado, motivo = tf.FALLO_VACIADO, f"{type(exc).__name__}: {exc}"
             ctx.log(f"{stem}: {motivo}", "error")
         with candado:
             hechos[0] += 1
@@ -285,11 +291,12 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
     if ctx.cancelled:
         return ToolResult.err(f"cancelado después de {hechos[0]} de {len(rutas)} modelos")
 
+    exportados_ok = tf.EXPORTADOS  # "changed to solid" también sale, como en ToothFORM
     modelos, lineas, exportados, fallidos, carpeta_export = [], [], [], [], ""
     for stem, caso, estado, motivo in hechos_por_modelo:  # en el orden de la entrada
         modelos.append(stem)
         lineas.append(f"{stem}    {estado}")
-        if estado == _EXPORTO:
+        if estado in exportados_ok:
             exportados.append(stem)
             carpeta_export = carpeta_export or fs.join(salida, caso)
         else:

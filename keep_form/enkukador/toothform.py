@@ -67,13 +67,31 @@ FRENTE_CURVA = (21.56, -1.0)
 PLACA_FRENTE = [(8.5, -10.5), (32.0, -8.0), (32.0, 8.0), (8.5, 10.5)]
 
 
+# Los estados del log, con los nombres de ToothFORM ("Toothform Error Meanings
+# and Solutions", el documento del fabricante):
+EXPORTO = "Export successfully"
+MACIZO = "Fail to hollow, changed to solid"  # exportado igual: "No modification is required"
+EXPORTADOS = (EXPORTO, MACIZO)
+FALLO_PREPROCESO = "Failed to preprocess"
+FALLO_VACIADO = "Failed to hollow"
+FALLO_UNION_QR = "Failed to merge"
+
+
+class FallaToothform(Exception):
+    """Un modelo que no sale, con el estado que pondría ToothFORM en su log."""
+
+    def __init__(self, estado: str, detalle: str):
+        super().__init__(f"{estado}: {detalle}")
+        self.estado, self.detalle = estado, detalle
+
+
 @dataclass
 class Resultado:
     pieza: trimesh.Trimesh
     encia: trimesh.Trimesh
     dientes: trimesh.Trimesh
     matriz: np.ndarray  # entrada -> marco ToothFORM
-    estado: str = "Export successfully"
+    estado: str = EXPORTO
     avisos: list[str] = field(default_factory=list)
 
 
@@ -320,20 +338,27 @@ def _puente(huella, centro: np.ndarray, tangente: np.ndarray):
 
 
 def pieza(solido: trimesh.Trimesh, curva: np.ndarray, caso: str, modelo: str,
-          p: Parametros) -> trimesh.Trimesh:
-    """Sólido ya en el marco ToothFORM (cortado en z=0) -> pieza para imprimir."""
+          p: Parametros) -> tuple[trimesh.Trimesh, bool]:
+    """Sólido ya en el marco ToothFORM (cortado en z=0) -> (pieza para imprimir,
+    si quedó hueca). Si no se puede vaciar, sale maciza, como ToothFORM ("Fail
+    to hollow, changed to solid"); si fallan las booleanas de la placa, el QR o
+    los agujeros, FallaToothform("Failed to merge")."""
     import shapely
     from shapely.geometry import Polygon, box
 
     huella = _contorno(solido)
-    cavidad = hueco.cavidad(solido, p.ShellThickness, 0.4)
+    hueco_ok = True
     try:
-        hueca = _mf(hueco.coser(solido, cavidad))
-    except ValueError:
-        # El plan B que Enkukador ya usa en hueco.vaciar y acá faltaba: restar
-        # la cavidad con manifold3d. Sin esto, "la costura no quedó cerrada"
-        # perdía el modelo (BY184 U03-A, keep-form, 15/10/2026).
-        hueca = _mf(hueco._restar(solido, cavidad))
+        cavidad = hueco.cavidad(solido, p.ShellThickness, 0.4)
+        try:
+            hueca = _mf(hueco.coser(solido, cavidad))
+        except ValueError:
+            # El plan B que Enkukador ya usa en hueco.vaciar y acá faltaba: restar
+            # la cavidad con manifold3d. Sin esto, "la costura no quedó cerrada"
+            # perdía el modelo (BY184 U03-A, keep-form, 15/10/2026).
+            hueca = _mf(hueco._restar(solido, cavidad))
+    except Exception:  # noqa: BLE001 - como ToothFORM: sin hueco, sale macizo
+        hueca, hueco_ok = _mf(solido), False
 
     # Piso: placa central (lengüeta + bajo los incisivos) y puentes con el texto.
     # Lo agregado queda 0,1 mm adentro de la pared exterior, así la unión no
@@ -374,7 +399,10 @@ def pieza(solido: trimesh.Trimesh, curva: np.ndarray, caso: str, modelo: str,
         _prisma(shapely.unary_union([g for g, _, _ in textos]), -1, p.BottomPlaneThickness + 0.01),
     ]
     todo = todo - mf.Manifold.batch_boolean(quitar, mf.OpType.Add)
-    return _tm(todo)
+    salida = _tm(todo)
+    if todo.status() != mf.Error.NoError or len(salida.faces) == 0:
+        raise FallaToothform(FALLO_UNION_QR, f"la placa, el QR o los agujeros no se unieron ({todo.status()})")
+    return salida, hueco_ok
 
 
 # ------------------------------------------------------------------ encía y dientes
@@ -414,11 +442,16 @@ def encia_y_dientes(malla: trimesh.Trimesh) -> tuple[trimesh.Trimesh, trimesh.Tr
 def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
             p: Parametros | None = None) -> Resultado:
     p = p or Parametros()
-    M, curva = marco(malla)
-    m = malla.copy()
-    m.apply_transform(M)
-    encia, dientes = encia_y_dientes(m)
-    solido = _tm(_mf(hueco.unir(m)).trim_by_plane((0, 0, 1), 0.0))
+    # Todo lo de antes de vaciar (marco, encía y dientes, unión) es el
+    # "preprocesamiento" de ToothFORM: si falla, no hay pieza.
+    try:
+        M, curva = marco(malla)
+        m = malla.copy()
+        m.apply_transform(M)
+        encia, dientes = encia_y_dientes(m)
+        solido = _tm(_mf(hueco.unir(m)).trim_by_plane((0, 0, 1), 0.0))
+    except Exception as exc:  # noqa: BLE001
+        raise FallaToothform(FALLO_PREPROCESO, f"{type(exc).__name__}: {exc}") from exc
     res = Resultado(pieza=solido, encia=encia, dientes=dientes, matriz=M)
 
     # Límites de la máquina: se chequean antes de armar la pieza.
@@ -428,11 +461,22 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
         res.estado = "Height limit exceeded"
         res.avisos.append(f"alto {alto:.2f} mm > LimitH {p.LimitH}")
         return res
-    if radio > p.LimitR / 2:  # PROVISORIO: LimitR como diámetro alrededor del QR
+    # LimitR es un diámetro: "Models with a diameter exceeding 98 mm are not
+    # suitable" (documento de errores de ToothFORM). Medido alrededor del QR,
+    # que es el centro de la pieza; eso último sigue sin confirmar.
+    if radio > p.LimitR / 2:
         res.estado = "Radius limit exceeded"
         res.avisos.append(f"radio {radio:.2f} mm > LimitR/2 {p.LimitR / 2}")
         return res
-    res.pieza = pieza(solido, curva, caso, modelo, p)
+    try:
+        res.pieza, hueca = pieza(solido, curva, caso, modelo, p)
+    except FallaToothform:
+        raise
+    except Exception as exc:  # noqa: BLE001 - el vaciado ya se atajó adentro: es la placa, el QR o los agujeros
+        raise FallaToothform(FALLO_UNION_QR, f"{type(exc).__name__}: {exc}") from exc
+    if not hueca:
+        res.estado = MACIZO
+        res.avisos.append("no se pudo vaciar: sale maciza, como hace ToothFORM")
     return res
 
 
@@ -452,9 +496,9 @@ def ply_ascii(malla: trimesh.Trimesh) -> bytes:
 
 def exportar(res: Resultado, nombre: str) -> dict[str, bytes]:
     """Los archivos como ToothFORM, {nombre de archivo: bytes}: <nombre>.stl
-    (sólo si exportó), -gum.stl y -tooth.ply. Quien llama los escribe."""
+    (si exportó, hueca o maciza), -gum.stl y -tooth.ply. Quien llama los escribe."""
     archivos = {}
-    if res.estado == "Export successfully":
+    if res.estado in EXPORTADOS:
         archivos[f"{nombre}.stl"] = res.pieza.export(file_type="stl")
     archivos[f"{nombre}-gum.stl"] = res.encia.export(file_type="stl")
     archivos[f"{nombre}-tooth.ply"] = ply_ascii(res.dientes)
