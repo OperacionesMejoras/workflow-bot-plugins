@@ -48,7 +48,8 @@ class Parametros:
     Radius2: float = 2.12
     # Lugar libre que necesita la pinza del robot alrededor de la lengüeta del
     # QR, que es por donde toma la pieza. 2.5 en el JSON de esta instalación;
-    # el documento de ToothFORM dice que nunca menos de 2.
+    # el documento de ToothFORM dice que nunca menos de 2. Hoy sólo decide si
+    # se avisa en el log (ver holgura_qr): no rechaza.
     LimitX: float = 2.5
 
 
@@ -453,10 +454,10 @@ def holgura_qr(solido: trimesh.Trimesh) -> float:
     mide, vista de arriba, la distancia entre la lengüeta y lo que el modelo
     tiene por encima del relieve del QR (encía y dientes).
 
-    PROVISORIO, sacado de tres modelos: BZ219-L05-A, que ToothFORM aceptó, da
-    2,68 mm; BZ254-U00-B y U01-A, que rechazó con "Clip limit exceeded", 0,86 y
-    1,26. En los tres lo más cerca es la encía lingual de los incisivos, frente
-    a la esquina delantera de la lengüeta.
+    NO es el criterio de ToothFORM: con tres modelos parecía separar (BZ219-L05-A
+    aceptado con 2,68 mm; BZ254-U00-B y U01-A rechazados con 0,86 y 1,26), pero
+    con más casos no (BZ254-L22-A aceptado con 0,80; los superiores de BZ219,
+    aceptados con 1,36 a 1,47). Se usa sólo como aviso en el log.
     """
     import shapely
     from shapely.geometry import box
@@ -505,14 +506,17 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
         res.estado = "Radius limit exceeded"
         res.avisos.append(f"radio {radio:.2f} mm > LimitR/2 {p.LimitR / 2}")
         return res
+    # Sólo aviso, no rechaza: la medida NO es la de ToothFORM. En la prueba de
+    # BOT.1 (14/10/2026) rechazaba modelos que ToothFORM acepta (los 22
+    # superiores de BZ219, con 1,36 a 1,47 mm) y no separa unos de otros:
+    # BZ254-L22-A pasó con 0,80 mm y BZ254-U01-A fue rechazado con 1,24. Queda
+    # el valor en el log hasta tener el criterio del proveedor.
     res.holgura_qr = holgura_qr(solido)
     if res.holgura_qr < p.LimitX:
-        res.estado = CLIP
         res.avisos.append(
-            f"quedan {res.holgura_qr:.2f} mm libres alrededor del QR y la pinza necesita LimitX {p.LimitX}: "
-            "recortar la encía lingual de los incisivos"
+            f"quedan {res.holgura_qr:.2f} mm libres alrededor del QR (LimitX {p.LimitX}); sólo aviso: "
+            "no es el criterio de ToothFORM para 'Clip limit exceeded'"
         )
-        return res
     try:
         res.pieza, hueca = pieza(solido, curva, caso, modelo, p)
     except FallaToothform:
