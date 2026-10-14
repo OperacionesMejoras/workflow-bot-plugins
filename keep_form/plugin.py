@@ -41,7 +41,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.1",
+    version="0.1.2",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -61,6 +61,12 @@ _PARAMETROS_TOOTHFORM = (
 )
 _EXT_MODELOS = (".stl", ".obj", ".ply", ".off")
 _EXPORTO = "Export successfully"
+# Lo que ToothFORM deja en <modelo>-MatA.txt: dos identidades 4x4 por filas,
+# CRLF. Revisados los 1492 de "Casos Terminados 2026" (14/10/2026): todos
+# iguales byte a byte, sin importar caso, maxilar ni A/B, y no describen la
+# transformación que aplica. Se escribe igual para que lo que venga después
+# en el flujo encuentre lo mismo que con ToothFORM.
+_MATA = ("1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\r\n" * 2).encode("ascii")
 
 EXPORTAR = ToolManifest(
     id="keep_form.exportar",
@@ -69,7 +75,7 @@ EXPORTAR = ToolManifest(
     doc=(
         "Hace lo que hace ToothFORM, sin ToothFORM: por cada modelo, la pieza hueca para "
         "imprimir con las referencias del robot (agujeros, llave, placa), el QR en relieve y "
-        "el texto calado, más -gum.stl y -tooth.ply, en <salida>\\<ID>, y un log "
+        "el texto calado, más -gum.stl, -tooth.ply y -MatA.txt, en <salida>\\<ID>, y un log "
         "<fecha>.<hora>.log con el formato de ToothFORM. Las salidas tienen los mismos nombres "
         "que las de 'toothform.exportar', así que en un flujo se cambia ese nodo por éste. "
         "Corre adentro del Bot, un modelo detrás de otro (unos segundos cada uno). Los "
@@ -220,6 +226,8 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             fs.make_dirs(destino)
             for archivo, datos in tf.exportar(resultado, stem).items():
                 fs.write_bytes(fs.join(destino, archivo), datos)
+            if estado == _EXPORTO:
+                fs.write_bytes(fs.join(destino, f"{stem}-MatA.txt"), _MATA)
             for aviso in resultado.avisos:
                 ctx.log(f"{stem}: {aviso}", "warning")
         except PortError:

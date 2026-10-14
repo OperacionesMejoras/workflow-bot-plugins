@@ -89,8 +89,10 @@ def test_exporta_como_toothform_pieza_gum_tooth_y_log(tmp_path, arcada_stl):
     assert pathlib.Path(o["carpeta_export"]).name == "AB123"
     hecho = tmp_path / "salida" / "AB123"
     assert sorted(p.name for p in hecho.iterdir()) == [
-        "AB123-L05-A-gum.stl", "AB123-L05-A-tooth.ply", "AB123-L05-A.stl",
+        "AB123-L05-A-MatA.txt", "AB123-L05-A-gum.stl", "AB123-L05-A-tooth.ply", "AB123-L05-A.stl",
     ]
+    # El de ToothFORM, byte a byte (66 bytes, CRLF, dos identidades).
+    assert (hecho / "AB123-L05-A-MatA.txt").read_bytes() == b"1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\r\n" * 2
     pieza = trimesh.load(hecho / "AB123-L05-A.stl")
     assert pieza.is_watertight and pieza.bounds[0][2] == pytest.approx(0, abs=1e-6)
     # El log, con el formato que lee 'toothform.check_log' / el flujo.
@@ -113,6 +115,8 @@ def test_un_modelo_roto_no_frena_el_resto_y_es_err_con_su_motivo(tmp_path, arcad
     assert o["modelos_fallidos"][0]["motivo"].startswith("Failed to hollow (")
     assert "AB123-U05-A    Failed to hollow" in o["log_texto"]
     assert (tmp_path / "salida" / "AB123" / "AB123-L05-A.stl").exists()
+    # El que falló no deja MatA, como ToothFORM, que lo escribe por modelo exportado.
+    assert not (tmp_path / "salida" / "AB123" / "AB123-U05-A-MatA.txt").exists()
 
 
 def test_no_toma_una_salida_como_entrada():
