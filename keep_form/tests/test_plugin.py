@@ -157,3 +157,45 @@ def test_el_manifest_se_puede_imprimir_en_una_consola_de_windows():
         ensure_ascii=False, default=str,
     )
     assert not sorted({c for c in texto if not c.encode("cp1252", "ignore")})
+
+
+def test_saca_las_partes_sueltas_y_deja_la_pieza_mas_grande():
+    _con_librerias()
+    import trimesh
+
+    from plugins.keep_form.plugin import _una_pieza
+
+    grande = trimesh.creation.box((10, 10, 10))
+    suelta = trimesh.creation.box((0.1, 0.1, 0.1))
+    suelta.apply_translation([20, 0, 0])
+    logs = []
+
+    class Ctx:
+        def log(self, m, *_a):
+            logs.append(m)
+
+    pieza = _una_pieza(Ctx(), "AB123-L05-A", trimesh.util.concatenate([grande, suelta]))
+    assert len(pieza.faces) == len(grande.faces) and pieza.is_watertight
+    assert "1 parte(s) suelta(s), 12 triángulos" in logs[0]
+    assert _una_pieza(Ctx(), "x", grande) is grande
+
+
+def test_si_rtree_no_carga_corta_una_vez_con_el_motivo(monkeypatch):
+    """Lo de BOT.1: sin MSVCP140.DLL, rtree se cae con OSError al importarse."""
+    _con_librerias()
+    import builtins
+
+    original = builtins.__import__
+
+    def sin_dll(nombre, *args, **kwargs):
+        if nombre.startswith("rtree"):
+            raise OSError("could not find or load spatialindex_c-64.dll")
+        return original(nombre, *args, **kwargs)
+
+    for nombre in [m for m in sys.modules if m.startswith("rtree")]:
+        monkeypatch.delitem(sys.modules, nombre)
+    monkeypatch.setattr(builtins, "__import__", sin_dll)
+    fs = FakeFs(files={"D:/caso/AB123-L05-A.stl": "x"})
+    r = _exportar(fs, carpeta="D:/caso", salida="D:/salida")
+    assert r.status == "err" and r.error_kind == "librerias"
+    assert "MSVCP140" in r.message and "Visual C++" in r.message

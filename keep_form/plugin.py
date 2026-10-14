@@ -41,7 +41,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.0",
+    version="0.1.1",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -99,6 +99,21 @@ EXPORTAR = ToolManifest(
         Output("faltantes", ParamType.JSON, doc="Los modelos pedidos que no tienen su <modelo>.stl."),
     ),
 )
+
+
+def _una_pieza(ctx: ToolContext, stem: str, pieza):
+    """
+    La pieza más grande, sin los pedacitos sueltos que a veces dejan las
+    booleanas (de 4 a 58 triángulos, en 9 de los 44 modelos de BZ219): una
+    pieza para imprimir es un solo cuerpo, y ToothFORM da uno en 43 de 44.
+    """
+    partes = pieza.split(only_watertight=False)
+    if len(partes) <= 1:
+        return pieza
+    partes = sorted(partes, key=lambda q: len(q.faces), reverse=True)
+    sueltas = sum(len(q.faces) for q in partes[1:])
+    ctx.log(f"{stem}: se sacaron {len(partes) - 1} parte(s) suelta(s), {sueltas} triángulos", "warning")
+    return partes[0]
 
 
 def _exportar(ctx: ToolContext) -> ToolResult:
@@ -167,6 +182,20 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             "requirements.txt de keep-form (reinstalar el plugin)",
             error_kind="librerias",
         )
+    # rtree (trimesh lo usa para ordenar los contornos de cada corte) carga una
+    # DLL que necesita MSVCP140.DLL, del Visual C++ Redistributable x64. Sin él
+    # el import se cae con OSError, no con ImportError, y cada modelo fallaba
+    # por separado con "Failed to hollow": BOT.1, 15/10/2026, 44 de 44. Se
+    # prueba una vez acá y se corta con el motivo.
+    try:
+        import rtree.index  # noqa: F401
+    except (ImportError, OSError) as exc:
+        return ToolResult.err(
+            f"la librería rtree no carga ({type(exc).__name__}: {exc}). En Windows casi siempre es "
+            "que falta MSVCP140.DLL: instalar el Microsoft Visual C++ Redistributable x64 en esta "
+            "máquina y reiniciar el Bot",
+            error_kind="librerias",
+        )
     p = tf.Parametros(**numeros)
 
     fs.make_dirs(salida)
@@ -185,6 +214,8 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
                 raise ValueError("no es una malla o está vacía")
             resultado = tf.generar(malla, caso, modelo or stem, p)
             estado = resultado.estado
+            if estado == _EXPORTO:
+                resultado.pieza = _una_pieza(ctx, stem, resultado.pieza)
             destino = fs.join(salida, caso)
             fs.make_dirs(destino)
             for archivo, datos in tf.exportar(resultado, stem).items():
