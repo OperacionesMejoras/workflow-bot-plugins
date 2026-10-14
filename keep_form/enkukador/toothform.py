@@ -15,8 +15,10 @@ hacia +X y origen en el agujero del centro del QR.
 Lo medido está en docs/TOOTHFORM_REFERENCIAS.md. Lo que es provisorio (falta
 confirmarlo con más pares) está marcado PROVISORIO.
 
-Copia de Enkukador (ver __init__.py) con dos cambios para que corra adentro
-del plugin: el texto sale de la DejaVu Sans Bold que viene en esta carpeta,
+Copia de Enkukador (ver __init__.py). Arreglos de keep-form: la pieza usa el
+plan B de la costura (hueco._restar) como ya hacía hueco.vaciar, y ni `_tm` ni
+hueco.unir juntan vértices (rompía las uniones donde dos partes se tocan por
+una arista). Y dos cambios para que corra adentro del plugin: el texto sale de la DejaVu Sans Bold que viene en esta carpeta,
 leída con fontTools, en vez de matplotlib; y `exportar` devuelve los bytes de
 cada archivo en vez de escribirlos, porque el plugin escribe por el port fs.
 """
@@ -125,8 +127,11 @@ def _mf(t: trimesh.Trimesh):
 
 
 def _tm(m) -> trimesh.Trimesh:
+    # Sin juntar vértices, por lo mismo que hueco.unir: lo que sale de
+    # manifold3d ya es cerrado, y juntarlos lo rompe donde dos partes se tocan
+    # por una arista (después ni manifold3d la acepta de vuelta).
     k = m.to_mesh()
-    return trimesh.Trimesh(k.vert_properties[:, :3], k.tri_verts)
+    return trimesh.Trimesh(k.vert_properties[:, :3], k.tri_verts, process=False)
 
 
 def _prisma(poli, z0: float, z1: float):
@@ -321,7 +326,14 @@ def pieza(solido: trimesh.Trimesh, curva: np.ndarray, caso: str, modelo: str,
     from shapely.geometry import Polygon, box
 
     huella = _contorno(solido)
-    hueca = _mf(hueco.coser(solido, hueco.cavidad(solido, p.ShellThickness, 0.4)))
+    cavidad = hueco.cavidad(solido, p.ShellThickness, 0.4)
+    try:
+        hueca = _mf(hueco.coser(solido, cavidad))
+    except ValueError:
+        # El plan B que Enkukador ya usa en hueco.vaciar y acá faltaba: restar
+        # la cavidad con manifold3d. Sin esto, "la costura no quedó cerrada"
+        # perdía el modelo (BY184 U03-A, keep-form, 15/10/2026).
+        hueca = _mf(hueco._restar(solido, cavidad))
 
     # Piso: placa central (lengüeta + bajo los incisivos) y puentes con el texto.
     # Lo agregado queda 0,1 mm adentro de la pared exterior, así la unión no

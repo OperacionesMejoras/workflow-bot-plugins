@@ -230,7 +230,11 @@ def unir(malla: trimesh.Trimesh) -> trimesh.Trimesh:
             raise ValueError(f"una pieza no es cerrada ({m.status()}): no se puede unir para vaciar")
         solidos.append(m)
     salida = mf.Manifold.batch_boolean(solidos, mf.OpType.Add).to_mesh()
-    unida = trimesh.Trimesh(salida.vert_properties[:, :3], salida.tri_verts, process=True)
+    # process=False: manifold3d ya la da cerrada. Juntar los vértices que
+    # coinciden en posición "pellizca" las piezas que se tocan sólo por una
+    # arista (un diente contra la encía) y trimesh la ve abierta: así fallaban
+    # BX087 U01/U10/U15 y BX059 U02 (keep-form, 15/10/2026).
+    unida = trimesh.Trimesh(salida.vert_properties[:, :3], salida.tri_verts, process=False)
     if not unida.is_watertight:
         raise ValueError("la unión de las piezas no quedó cerrada: no se puede vaciar")
     return unida

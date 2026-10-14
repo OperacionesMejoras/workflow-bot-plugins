@@ -203,3 +203,82 @@ def test_si_rtree_no_carga_corta_una_vez_con_el_motivo(monkeypatch):
     r = _exportar(fs, carpeta="D:/caso", salida="D:/salida")
     assert r.status == "err" and r.error_kind == "librerias"
     assert "MSVCP140" in r.message and "Visual C++" in r.message
+
+
+def test_unir_piezas_que_se_tocan_por_una_arista():
+    """BX087 U01/U10/U15, BX059 U02: 'la unión de las piezas no quedó cerrada'.
+    manifold3d la da cerrada; juntar vértices la pellizcaba."""
+    _con_librerias()
+    import trimesh
+
+    from plugins.keep_form.enkukador import hueco
+
+    a = trimesh.creation.box((10, 10, 10))
+    a.apply_translation([5, 5, 5])
+    b = trimesh.creation.box((4, 4, 10))
+    b.apply_translation([12, 12, 5])  # toca a 'a' sólo por la arista x=10, y=10
+    unida = hueco.unir(trimesh.util.concatenate([a, b]))
+    assert unida.is_watertight
+    assert unida.volume == pytest.approx(1000 + 160)
+
+
+def test_si_la_costura_falla_usa_el_plan_b(tmp_path, arcada_stl, monkeypatch):
+    """BY184 U03-A: 'la costura no quedó cerrada' perdía el modelo."""
+    import trimesh
+
+    from plugins.keep_form.enkukador import hueco
+
+    def costura_rota(*_a, **_k):
+        raise ValueError("la costura no quedó cerrada")
+
+    monkeypatch.setattr(hueco, "coser", costura_rota)
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
+    r = _exportar(LocalFsAdapter(root=tmp_path), carpeta="caso", salida="salida")
+
+    assert r.status == "ok", r.message
+    pieza = trimesh.load(tmp_path / "salida" / "AB123" / "AB123-L05-A.stl")
+    assert pieza.is_watertight and pieza.body_count == 1
+
+
+def test_un_error_viejo_de_rtree_guardado_en_trimesh_se_reemplaza(monkeypatch):
+    """Si rtree falló una vez, trimesh se quedaba con el error aunque se arreglara la DLL."""
+    _con_librerias()
+    import trimesh.base
+    import trimesh.path.polygons
+    from rtree.index import Index
+    from trimesh.exceptions import ExceptionWrapper
+
+    from plugins.keep_form.plugin import _rtree_listo
+
+    viejo = ExceptionWrapper(OSError("could not find or load spatialindex_c-64.dll"))
+    monkeypatch.setattr(trimesh.base, "Index", viejo)
+    monkeypatch.setattr(trimesh.path.polygons, "Index", viejo)
+    logs = []
+
+    class Ctx:
+        def log(self, m, *_a):
+            logs.append(m)
+
+    assert _rtree_listo(Ctx()) is None
+    assert trimesh.base.Index is Index and trimesh.path.polygons.Index is Index
+    assert len(logs) == 2 and "error viejo de rtree" in logs[0]
+
+
+def test_paralelo_da_lo_mismo_y_en_el_orden_de_la_entrada(tmp_path, arcada_stl):
+    (tmp_path / "caso").mkdir()
+    for nombre in ("AB123-L05-A", "AB123-L06-A", "AB123-L07-A"):
+        (tmp_path / "caso" / f"{nombre}.stl").write_bytes(arcada_stl)
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="salida", paralelo=2)
+
+    assert r.status == "ok", r.message
+    assert r.outputs["exportados"] == ["AB123-L05-A", "AB123-L06-A", "AB123-L07-A"]
+    assert r.outputs["log_texto"].splitlines()[:3] == [
+        "AB123-L05-A    Export successfully", "AB123-L06-A    Export successfully",
+        "AB123-L07-A    Export successfully",
+    ]
+    assert any("2 a la vez" in m for m in logs)
+    import re
+
+    assert sorted(m.split(" ")[0] for m in logs if re.match(r"\d+/\d+ ", m)) == ["1/3", "2/3", "3/3"]

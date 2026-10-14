@@ -21,7 +21,9 @@ las instalaciones que sólo corren Toothform.exe.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
+import threading
 import time
 
 from backend.core import ports as port_names
@@ -41,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.2",
+    version="0.1.3",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -87,6 +89,11 @@ EXPORTAR = ToolManifest(
         Param("carpeta", ParamType.PATH, default="", doc="Carpeta con los modelos: TODOS los .stl/.obj/.ply/.off de adentro. Alternativa a 'archivos'."),
         Param("archivos", ParamType.JSON, default=[], doc="Alternativa a 'carpeta': sólo estos archivos (ej. {rutas} de 'buscar')."),
         Param("salida", ParamType.PATH, required=True, doc="Carpeta de salida: ahí caen el log y <ID>\\ con el export."),
+        Param(
+            "paralelo", ParamType.INT, default=1,
+            doc="Cuántos modelos a la vez (hasta 8). Con 2 es ~1,35 veces más rápido; cada uno "
+            "suma memoria (~3 GB uno solo en un caso real). 1 = uno detrás de otro.",
+        ),
     ),
     extra_params=True,
     outputs=(
@@ -105,6 +112,40 @@ EXPORTAR = ToolManifest(
         Output("faltantes", ParamType.JSON, doc="Los modelos pedidos que no tienen su <modelo>.stl."),
     ),
 )
+
+
+def _rtree_listo(ctx: ToolContext) -> ToolResult | None:
+    """
+    rtree (trimesh lo usa para ordenar los contornos de cada corte) carga una
+    DLL que necesita MSVCP140.DLL, del Visual C++ Redistributable x64. Sin él
+    el import se cae con OSError, no con ImportError, y cada modelo fallaba
+    por separado con "Failed to hollow": BOT.1, 15/10/2026, 44 de 44. Se
+    prueba una vez acá y se corta con el motivo.
+
+    Y si alguna vez falló, trimesh se quedó con ese error: `trimesh.base` y
+    `trimesh.path.polygons` importan `rtree.index.Index` una sola vez y, si no
+    carga, guardan un `ExceptionWrapper` que sigue fallando aunque después se
+    arregle la DLL, hasta reiniciar el Bot. Si rtree ya carga, se les devuelve
+    la clase buena.
+    """
+    try:
+        from rtree.index import Index
+    except (ImportError, OSError) as exc:
+        return ToolResult.err(
+            f"la librería rtree no carga ({type(exc).__name__}: {exc}). En Windows casi siempre es "
+            "que falta MSVCP140.DLL: instalar el Microsoft Visual C++ Redistributable x64 en esta "
+            "máquina (o un instalador del Bot que la traiga) y reiniciar el Bot",
+            error_kind="librerias",
+        )
+    import trimesh.base
+    import trimesh.path.polygons
+    from trimesh.exceptions import ExceptionWrapper
+
+    for modulo in (trimesh.base, trimesh.path.polygons):
+        if isinstance(getattr(modulo, "Index", None), ExceptionWrapper):
+            modulo.Index = Index
+            ctx.log(f"{modulo.__name__} tenía guardado un error viejo de rtree: se lo reemplazó", "warning")
+    return None
 
 
 def _una_pieza(ctx: ToolContext, stem: str, pieza):
@@ -188,31 +229,22 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             "requirements.txt de keep-form (reinstalar el plugin)",
             error_kind="librerias",
         )
-    # rtree (trimesh lo usa para ordenar los contornos de cada corte) carga una
-    # DLL que necesita MSVCP140.DLL, del Visual C++ Redistributable x64. Sin él
-    # el import se cae con OSError, no con ImportError, y cada modelo fallaba
-    # por separado con "Failed to hollow": BOT.1, 15/10/2026, 44 de 44. Se
-    # prueba una vez acá y se corta con el motivo.
-    try:
-        import rtree.index  # noqa: F401
-    except (ImportError, OSError) as exc:
-        return ToolResult.err(
-            f"la librería rtree no carga ({type(exc).__name__}: {exc}). En Windows casi siempre es "
-            "que falta MSVCP140.DLL: instalar el Microsoft Visual C++ Redistributable x64 en esta "
-            "máquina y reiniciar el Bot",
-            error_kind="librerias",
-        )
+    if (sin_rtree := _rtree_listo(ctx)) is not None:
+        return sin_rtree
     p = tf.Parametros(**numeros)
 
     fs.make_dirs(salida)
-    modelos, lineas, exportados, fallidos, carpeta_export = [], [], [], [], ""
-    for numero, ruta in enumerate(rutas, 1):
-        if ctx.cancelled:
-            return ToolResult.err(f"cancelado después de {numero - 1} de {len(rutas)} modelos")
+    paralelo = max(1, min(int(ctx.params.get("paralelo") or 1), 8))
+    hechos = [0]
+    candado = threading.Lock()
+
+    def uno(ruta: str) -> tuple[str, str, str, str]:
+        """(stem, caso, estado, motivo) de un modelo; deja sus archivos en la salida."""
         nombre = fs.basename(ruta)
         stem, _, ext = nombre.rpartition(".")
-        modelos.append(stem)
         caso, _, modelo = stem.partition("-")
+        if ctx.cancelled:
+            return stem, caso, "Cancelled", "se canceló el run antes de procesarlo"
         motivo = ""
         try:
             malla = trimesh.load(io.BytesIO(fs.read_bytes(ruta)), file_type=ext.lower(), force="mesh")
@@ -235,7 +267,27 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
         except Exception as exc:  # un modelo roto no frena el caso, como en ToothFORM
             estado, motivo = "Failed to hollow", f"{type(exc).__name__}: {exc}"
             ctx.log(f"{stem}: {motivo}", "error")
-        ctx.log(f"{numero}/{len(rutas)} {stem}: {estado}")
+        with candado:
+            hechos[0] += 1
+            ctx.log(f"{hechos[0]}/{len(rutas)} {stem}: {estado}")
+        return stem, caso, estado, motivo
+
+    if paralelo > 1:
+        # Hilos y no procesos: un plugin no lanza procesos por fuera del port
+        # 'process'. numpy, scipy, manifold3d y scikit-image sueltan el GIL en
+        # lo pesado: con 2 a la vez, 4 modelos tardaron 11,5 s contra 15,5 s
+        # uno detrás de otro, y con 4, 10,7 s. La memoria crece con cada uno.
+        ctx.log(f"{len(rutas)} modelos, {paralelo} a la vez")
+        with concurrent.futures.ThreadPoolExecutor(paralelo) as ejecutor:
+            hechos_por_modelo = list(ejecutor.map(uno, rutas))
+    else:
+        hechos_por_modelo = [uno(r) for r in rutas]
+    if ctx.cancelled:
+        return ToolResult.err(f"cancelado después de {hechos[0]} de {len(rutas)} modelos")
+
+    modelos, lineas, exportados, fallidos, carpeta_export = [], [], [], [], ""
+    for stem, caso, estado, motivo in hechos_por_modelo:  # en el orden de la entrada
+        modelos.append(stem)
         lineas.append(f"{stem}    {estado}")
         if estado == _EXPORTO:
             exportados.append(stem)
