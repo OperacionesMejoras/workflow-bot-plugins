@@ -326,8 +326,8 @@ def test_si_fallan_la_placa_o_el_qr_es_failed_to_merge(tmp_path, arcada_stl, mon
 
 
 def test_el_pasillo_del_qr_es_solo_aviso_y_no_rechaza(tmp_path, arcada_stl):
-    """El criterio es el de ToothFORM, pero el marco del QR es provisorio:
-    con poco lugar avisa en el log y exporta igual."""
+    """El criterio y el marco son los de ToothFORM, pero hasta que el
+    proveedor lo confirme, con poco lugar avisa en el log y exporta igual."""
     (tmp_path / "caso").mkdir()
     (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
     logs = []
@@ -339,6 +339,31 @@ def test_el_pasillo_del_qr_es_solo_aviso_y_no_rechaza(tmp_path, arcada_stl):
     assert any("pasillo QR" in m for m in logs)
     assert any("sólo aviso" in m for m in logs)
     assert (tmp_path / "sale" / "AB123" / "AB123-L05-A.stl").exists()
+
+
+def test_el_marco_es_el_de_toothform():
+    """Arcada simétrica, cerrada atrás por una recta: esa recta va paralela a Y,
+    los incisivos a +X, y = 0 en el medio de la arcada, base en z = -0,5 y el
+    frente a QR_FRENTE_X (acá manda la regla del frente: la cara lingual
+    quedaría más lejos que QR_LINGUAL_X)."""
+    _con_librerias()
+    import numpy as np
+
+    from plugins.keep_form.enkukador import toothform as tf
+
+    malla = _arcada_con_dientes()
+    # La U extruida tiene la tapa igual a la base; achicarla un poco para que
+    # la base sea la de abajo, como en un escaneo.
+    malla.vertices[malla.vertices[:, 2] > 13.9, :2] *= 0.99
+    M, curva = tf.marco(malla)
+    v = malla.copy().apply_transform(M).vertices
+    assert abs(v[:, 2].min() + 0.5) < 1e-6
+    assert abs(v[:, 1].mean()) < 0.05  # simétrica: y=0 en el medio
+    atras = v[v[:, 0] < v[:, 0].min() + 1e-3]  # la recta de atrás, toda al mismo x
+    assert np.ptp(atras[:, 1]) > 30
+    frente = v[(np.abs(v[:, 1]) < 0.5) & (v[:, 2] < 1.0)]  # el anillo de la base, adelante
+    assert abs(frente[:, 0].max() - tf.QR_FRENTE_X) < 0.05
+    assert curva[:, 0].max() > 20 and abs(curva[np.argmax(curva[:, 0]), 1]) < 0.5
 
 
 def test_pasillo_qr_es_el_criterio_de_toothform():

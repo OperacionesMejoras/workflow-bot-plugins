@@ -9,8 +9,10 @@ Por cada modelo deja, como ToothFORM:
     <modelo>-tooth.ply  los dientes, cerrados, en PLY ASCII (ídem)
 
 Todo en el marco de ToothFORM: base original en z=-0,5 (se cortan 0,5 mm),
-rectángulo de área mínima del contorno de corte alineado a X/Y, incisivos
-hacia +X y origen en el agujero del centro del QR.
+el lado más largo del casco convexo del contorno de corte paralelo a Y,
+incisivos hacia +X y origen en el agujero del centro del QR, que queda en el
+medio de la arcada en Y y a una distancia fija del modelo en X (ver `marco`:
+es el algoritmo de Toothform.exe, leído del binario).
 
 Lo medido está en docs/TOOTHFORM_REFERENCIAS.md. Lo que es provisorio (falta
 confirmarlo con más pares) está marcado PROVISORIO.
@@ -65,9 +67,12 @@ LENGUETA = (-8.0, 8.5, -8.0, 8.0)  # x0, x1, y0, y1
 TEXTO_CUERPO = 3.44  # mm de cuerpo (Verdana Bold): letras de 2,5 mm de alto
 TEXTO_POS = 0.70  # fracción del largo de cada rama, desde el frente
 PUENTE_ANCHO = 14.4  # largo del puente a lo largo de la arcada
-# PROVISORIO: el punto más anterior de la curva central va acá (BZ219 y BZ254
-# dan (21,45; -1,36) y (21,67; -0,64)). Falta deducir la regla con más pares.
-FRENTE_CURVA = (21.56, -1.0)
+# Dónde queda el modelo respecto del QR en X (ver marco, paso 4). El 12,5 es
+# 12 + 0,5 de Core.dll. El 26 es 41 más un valor de configuración de Core.dll
+# que no se ve desde afuera; está medido en BZ254-L22-A (único par en que
+# mandó esta regla y no la lingual) y hay que confirmarlo con más pares.
+QR_FRENTE_X = 26.0
+QR_LINGUAL_X = 12.5
 # PROVISORIO: borde de la placa bajo los incisivos (dos rectas medidas).
 PLACA_FRENTE = [(8.5, -10.5), (32.0, -8.0), (32.0, 8.0), (8.5, 10.5)]
 
@@ -110,33 +115,90 @@ def _curva(local: trimesh.Trimesh) -> tuple[np.ndarray, object]:
     return arco.remuestrear_curva(arco.curva_central(poli), 0.1), poli
 
 
-def marco(malla: trimesh.Trimesh) -> tuple[np.ndarray, np.ndarray]:
-    """Matriz entrada -> marco ToothFORM y la curva central en ese marco."""
+def _cruces_x(malla: trimesh.Trimesh, y: float, z: float) -> np.ndarray:
+    """x de los cruces de la malla con la recta paralela a X que pasa por (y, z), ordenados."""
+    loc, _, _ = malla.ray.intersects_location(
+        np.array([[-1e3, y, z]]), np.array([[1.0, 0.0, 0.0]]), multiple_hits=True
+    )
+    return np.sort(np.asarray(loc, float).reshape(-1, 3)[:, 0]) if len(loc) else np.empty(0)
+
+
+def _cruces_y(malla: trimesh.Trimesh, x: float, y: float, z: float) -> tuple[float, float]:
+    """Distancias (hacia +Y, hacia -Y) a la pared más cercana desde (x, y, z)."""
+    o = np.array([[x, y, z], [x, y, z]])
+    loc, ir, _ = malla.ray.intersects_location(o, np.array([[0, 1.0, 0], [0, -1.0, 0]]), multiple_hits=True)
+    t = np.asarray(loc, float).reshape(-1, 3)[:, 1] - y
+    mas, menos = t[ir == 0], t[ir == 1]
+    mas, menos = mas[mas > 0], menos[menos < 0]
+    return (float(mas.min()) if len(mas) else np.inf), (float(menos.max()) if len(menos) else -np.inf)
+
+
+def marco(malla: trimesh.Trimesh, p: Parametros | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Matriz entrada -> marco ToothFORM y la curva central (a CORTE) en ese marco.
+
+    Es lo que hace Toothform.exe (release 20260518, leído del binario y
+    comprobado contra pares entrada/salida de BZ219 y BZ254: giro y origen
+    coinciden a menos de 0,03 mm):
+
+    1. Plano de la base, Z hacia adentro del modelo; se cortan CORTE mm.
+    2. Giro en Z: el lado más largo del casco convexo del contorno de corte
+       queda paralelo a Y (en la U es la recta que cierra la arcada por
+       atrás, entre los dos extremos). Los incisivos quedan hacia +X.
+    3. Origen: desde el centroide de los vértices, siete rectas paralelas a
+       Y a 2 mm sobre el corte, en x = xc + 2k (k = -3..3). Cada una da el
+       punto medio entre las dos paredes más cercanas (vale si las dos están
+       a 3 mm o más y el medio a menos de 20); el origen es el promedio de
+       esos puntos. Así y = 0 queda en el medio de la arcada.
+    4. Corrimiento en X (DzCreateDentalQrCommand::IsAutoCutSupportedQr, en
+       Core.dll): con rectas paralelas a X a 0,1 mm sobre el corte, se corre
+       el modelo lo máximo entre dejar su frente (último cruce en y = 0) en
+       QR_FRENTE_X y dejar su cara lingual (primer cruce en y = ±(QrSize+1)/2,
+       el ancho del QR con su margen) en QR_LINGUAL_X.
+    """
+    p = p or Parametros()
     encia = base.pieza_principal(malla)
     b = base.detectar_base(encia)
     M = b.plano.a_local()  # base en z=0, Z hacia adentro del modelo
-    local = encia.copy()
-    local.apply_transform(M)
-    curva, poli = _curva(local)
-    # Rectángulo de área mínima del contorno: uno de sus lados va a X.
-    rect = np.array(poli.minimum_rotated_rectangle.exterior.coords)[:2]
-    giro = -np.arctan2(*(rect[1] - rect[0])[::-1])
-    # De los cuatro giros a 90°, el que deja el frente del arco hacia +X.
-    mejor = None
-    for k in range(4):
-        a = giro + k * np.pi / 2
-        R = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
-        c = curva @ R.T
-        frente = c[:, 0].max() - (c[0, 0] + c[-1, 0]) / 2
-        if mejor is None or frente > mejor[0]:
-            mejor = (frente, a)
-    G = arco.rotacion_z(-np.degrees(mejor[1]))  # rotacion_z cambia de marco: gira al revés
+    enc = encia.copy()
+    enc.apply_transform(M)
+    curva, poli = _curva(enc)
+    # 2. Giro: el lado más largo del casco convexo del contorno va a Y, y X
+    # apunta de ese lado hacia la arcada (del fondo de la U a los incisivos).
+    casco = np.array(poli.convex_hull.exterior.coords)
+    seg = np.diff(casco, axis=0)
+    i = int(np.argmax(np.linalg.norm(seg, axis=1)))
+    d = seg[i] / np.linalg.norm(seg[i])
+    n = np.array([-d[1], d[0]])
+    if np.dot(np.array(poli.centroid.coords[0]) - casco[i], n) < 0:
+        n = -n
+    G = arco.rotacion_z(np.degrees(np.arctan2(n[1], n[0])))  # expresa la geometría con X = n
+    local = malla.copy()
+    local.apply_transform(G @ M)
     c = curva @ G[:2, :2].T
+    # 3. Origen: el medio de la arcada a 2 mm sobre el corte.
+    v = local.vertices[local.vertices[:, 2] >= CORTE]
+    xc, yc = v[:, :2].mean(axis=0)
+    medios = []
+    for k in range(-3, 4):
+        x = xc + 2.0 * k
+        mas, menos = _cruces_y(local, x, yc, CORTE + 2.0)
+        medio = (mas + menos) / 2
+        if abs(mas) >= 3.0 and abs(menos) >= 3.0 and abs(medio) < 20.0:
+            medios.append((x, yc + medio))
+    if not medios:
+        raise ValueError("no se encontró el medio de la arcada para ubicar el QR")
+    ox, oy = np.mean(medios, axis=0)
+    # 4. Corrimiento en X. Las rectas van a 0,1 mm sobre el corte, donde sólo
+    # hay encía; los cruces se miden respecto del origen de recién.
+    w = (p.QrSize + 1.0) * 0.5
+    frente = _cruces_x(local, oy, CORTE + 0.1)
+    lingual = [_cruces_x(local, oy + s * w, CORTE + 0.1) for s in (1.0, -1.0)]
+    if len(frente) < 2 or not all(len(l) for l in lingual):
+        raise ValueError("la recta a 0,1 mm sobre el corte no cruza el modelo: no se puede ubicar el QR")
+    dx = max(QR_FRENTE_X - (frente.max() - ox), QR_LINGUAL_X - (min(l.min() for l in lingual) - ox))
     T = np.eye(4)
-    frente = c[np.argmax(c[:, 0])]
-    T[:3, 3] = [FRENTE_CURVA[0] - frente[0], FRENTE_CURVA[1] - frente[1], -CORTE]
-    M = T @ G @ M
-    return M, c + T[:2, 3]
+    T[:3, 3] = [dx - ox, -oy, -CORTE]
+    return T @ G @ M, c + T[:2, 3]
 
 
 # ------------------------------------------------------------------ mallas
@@ -457,11 +519,12 @@ def pasillo_qr(solido: trimesh.Trimesh, p: Parametros) -> float:
     lado. Acá se devuelve min |y| - w de los vértices con x <= 10 - w; si queda
     menos que LimitX, ToothFORM rechaza. (Toothform.exe, 0x41d065-0x41d147:
     w de ParameterSettings.QrSize, la constante 10.0 en 0x44c638 y LimitX;
-    estado 103 = "Clip limit exceeded".)
+    estado 103 = "Clip limit exceeded".) Lo mide sobre la encía cortada, sin
+    los 0,5 mm de abajo: acá, sobre el sólido ya cortado en z = 0.
 
-    Depende de dónde quede el QR respecto de la arcada, y eso en el marco de
-    Enkukador es PROVISORIO (FRENTE_CURVA, ±0,4 mm en Y): un corrimiento en Y
-    acerca el pasillo a una rama.
+    Depende de dónde quede el QR respecto de la arcada: con el marco de
+    `marco` (el de ToothFORM) los pares reales dan lo mismo que ToothFORM a
+    menos de 0,03 mm.
     """
     w = (p.QrSize + 1.0) * 0.5
     v = solido.vertices
@@ -477,7 +540,7 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
     # Todo lo de antes de vaciar (marco, encía y dientes, unión) es el
     # "preprocesamiento" de ToothFORM: si falla, no hay pieza.
     try:
-        M, curva = marco(malla)
+        M, curva = marco(malla, p)
         m = malla.copy()
         m.apply_transform(M)
         encia, dientes = encia_y_dientes(m)
@@ -500,16 +563,17 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
         res.estado = "Radius limit exceeded"
         res.avisos.append(f"radio {radio:.2f} mm > LimitR/2 {p.LimitR / 2}")
         return res
-    # Sólo aviso todavía: el criterio es el de ToothFORM, pero depende de dónde
-    # quede el QR (provisorio en este marco) y de qué LimitX se usó (2.5 en el
-    # JSON de esta instalación, 3.0 en el de ejemplo del fabricante): BZ254
-    # U00-B y U01-A, que ToothFORM rechazó, dan 2,95 y 2,65 mm; BZ219-L05-A,
-    # aceptado, 4,15.
+    # Sólo aviso todavía, hasta que el proveedor confirme el criterio y el
+    # LimitX que usa la instalación. Con el marco de ToothFORM los casos
+    # reales dan: aceptados BZ254-U06-A 2,55, BZ219-U05-A 2,55 y BZ254-L22-A
+    # 5,66; rechazados BZ254-U00-B 2,45 y U01-A 2,44 (separa justo con 2,5).
+    # BZ472-U00-B, que ToothFORM rechazó, da 3,49: eso no lo explica este
+    # control, y es lo que falta aclarar antes de rechazar.
     res.holgura_qr = pasillo_qr(solido, p)
     if res.holgura_qr < p.LimitX:
         res.avisos.append(
             f"el pasillo de la pinza hacia el QR deja {res.holgura_qr:.2f} mm y LimitX es {p.LimitX}: "
-            "ToothFORM daría 'Clip limit exceeded' (sólo aviso: el marco del QR es provisorio)"
+            "ToothFORM daría 'Clip limit exceeded' (sólo aviso hasta confirmarlo con el proveedor)"
         )
     try:
         res.pieza, hueca = pieza(solido, curva, caso, modelo, p)
