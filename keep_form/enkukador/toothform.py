@@ -73,6 +73,9 @@ PUENTE_ANCHO = 14.4  # largo del puente a lo largo de la arcada
 # mandó esta regla y no la lingual) y hay que confirmarlo con más pares.
 QR_FRENTE_X = 26.0
 QR_LINGUAL_X = 12.5
+# Margen del pasillo del QR dentro del cual el veredicto de ToothFORM no se
+# puede predecir (su origen en Y puede diferir unas décimas del nuestro).
+AL_LIMITE = 0.2
 # PROVISORIO: borde de la placa bajo los incisivos (dos rectas medidas).
 PLACA_FRENTE = [(8.5, -10.5), (32.0, -8.0), (32.0, 8.0), (8.5, 10.5)]
 
@@ -569,11 +572,21 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
     # 5,66; rechazados BZ254-U00-B 2,45 y U01-A 2,44 (separa justo con 2,5).
     # BZ472-U00-B, que ToothFORM rechazó, da 3,49: eso no lo explica este
     # control, y es lo que falta aclarar antes de rechazar.
+    # A menos de AL_LIMITE del LimitX no se puede afirmar nada: el origen de
+    # ToothFORM sale de 7 rectas que a veces agarran o sueltan una pared por
+    # décimas (BZ219-U00-B: 2,36 acá, 2,55 en ToothFORM, aceptado).
     res.holgura_qr = pasillo_qr(solido, p)
     if res.holgura_qr < p.LimitX:
         res.avisos.append(
             f"el pasillo de la pinza hacia el QR deja {res.holgura_qr:.2f} mm y LimitX es {p.LimitX}: "
-            "ToothFORM daría 'Clip limit exceeded' (sólo aviso hasta confirmarlo con el proveedor)"
+            + ("al límite, ToothFORM puede aceptarlo o rechazarlo" if p.LimitX - res.holgura_qr < AL_LIMITE
+               else "ToothFORM daría 'Clip limit exceeded'")
+            + " (sólo aviso hasta confirmarlo con el proveedor)"
+        )
+    elif res.holgura_qr - p.LimitX < AL_LIMITE:
+        res.avisos.append(
+            f"el pasillo de la pinza hacia el QR deja {res.holgura_qr:.2f} mm, justo sobre LimitX {p.LimitX}: "
+            "al límite, ToothFORM puede aceptarlo o rechazarlo"
         )
     try:
         res.pieza, hueca = pieza(solido, curva, caso, modelo, p)
