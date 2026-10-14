@@ -48,8 +48,8 @@ class Parametros:
     Radius2: float = 2.12
     # Lugar libre que necesita la pinza del robot alrededor de la lengüeta del
     # QR, que es por donde toma la pieza. 2.5 en el JSON de esta instalación;
-    # el documento de ToothFORM dice que nunca menos de 2. Hoy sólo decide si
-    # se avisa en el log (ver holgura_qr): no rechaza.
+    # el documento de ToothFORM dice que nunca menos de 2; 3.0 en el JSON de
+    # ejemplo del fabricante. Hoy sólo decide si se avisa (ver pasillo_qr).
     LimitX: float = 2.5
 
 
@@ -99,7 +99,7 @@ class Resultado:
     matriz: np.ndarray  # entrada -> marco ToothFORM
     estado: str = EXPORTO
     avisos: list[str] = field(default_factory=list)
-    holgura_qr: float | None = None  # mm libres alrededor de la lengüeta (ver holgura_qr)
+    holgura_qr: float | None = None  # margen del pasillo de la pinza hacia el QR (ver pasillo_qr)
 
 
 # ------------------------------------------------------------------ marco
@@ -446,35 +446,29 @@ def encia_y_dientes(malla: trimesh.Trimesh) -> tuple[trimesh.Trimesh, trimesh.Tr
 # ------------------------------------------------------------------ todo junto
 
 
-def holgura_qr(solido: trimesh.Trimesh) -> float:
-    """Cuánto lugar libre queda alrededor de la lengüeta del QR, en mm.
+def pasillo_qr(solido: trimesh.Trimesh, p: Parametros) -> float:
+    """Margen del pasillo de la pinza hacia el QR, en mm: "Clip limit exceeded"
+    de ToothFORM si es menor que LimitX.
 
-    "Clip limit exceeded" de ToothFORM: la pinza del robot toma la pieza por
-    el QR y necesita LimitX mm libres alrededor de la lengüeta para bajar. Se
-    mide, vista de arriba, la distancia entre la lengüeta y lo que el modelo
-    tiene por encima del relieve del QR (encía y dientes).
+    Es el control de Toothform.exe (release 20260518), leído del binario: con
+    w = (QrSize + 1) / 2, ningún vértice del modelo puede caer en x <= 10 - w
+    con |y| < w + LimitX. La pinza entra al QR desde atrás, por la parte
+    abierta de la U, y necesita un pasillo del ancho del QR más LimitX de cada
+    lado. Acá se devuelve min |y| - w de los vértices con x <= 10 - w; si queda
+    menos que LimitX, ToothFORM rechaza. (Toothform.exe, 0x41d065-0x41d147:
+    w de ParameterSettings.QrSize, la constante 10.0 en 0x44c638 y LimitX;
+    estado 103 = "Clip limit exceeded".)
 
-    NO es el criterio de ToothFORM: con tres modelos parecía separar (BZ219-L05-A
-    aceptado con 2,68 mm; BZ254-U00-B y U01-A rechazados con 0,86 y 1,26), pero
-    con más casos no (BZ254-L22-A aceptado con 0,80; los superiores de BZ219,
-    aceptados con 1,36 a 1,47). Se usa sólo como aviso en el log.
+    Depende de dónde quede el QR respecto de la arcada, y eso en el marco de
+    Enkukador es PROVISORIO (FRENTE_CURVA, ±0,4 mm en Y): un corrimiento en Y
+    acerca el pasillo a una rama.
     """
-    import shapely
-    from shapely.geometry import box
-
-    x0, x1, y0, y1 = LENGUETA
-    lengueta = box(x0, y0, x1, y1)
-    arriba = solido.slice_plane([0, 0, PLACA + RELIEVE_QR], [0, 0, 1])
-    if len(arriba.faces) == 0:
+    w = (p.QrSize + 1.0) * 0.5
+    v = solido.vertices
+    atras = v[v[:, 0] <= 10.0 - w]
+    if len(atras) == 0:
         return float("inf")
-    tri = arriba.triangles[:, :, :2]
-    c = tri.mean(axis=1)
-    cerca = (c[:, 0] > x0 - 15) & (c[:, 0] < x1 + 15) & (c[:, 1] > y0 - 15) & (c[:, 1] < y1 + 15)
-    if not cerca.any():
-        return float("inf")
-    anillos = np.concatenate([tri[cerca], tri[cerca][:, :1]], axis=1)  # cerrados
-    d = shapely.distance(lengueta, shapely.polygons(anillos))
-    return float(np.nanmin(d))
+    return float(np.abs(atras[:, 1]).min() - w)
 
 
 def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
@@ -506,16 +500,16 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
         res.estado = "Radius limit exceeded"
         res.avisos.append(f"radio {radio:.2f} mm > LimitR/2 {p.LimitR / 2}")
         return res
-    # Sólo aviso, no rechaza: la medida NO es la de ToothFORM. En la prueba de
-    # BOT.1 (14/10/2026) rechazaba modelos que ToothFORM acepta (los 22
-    # superiores de BZ219, con 1,36 a 1,47 mm) y no separa unos de otros:
-    # BZ254-L22-A pasó con 0,80 mm y BZ254-U01-A fue rechazado con 1,24. Queda
-    # el valor en el log hasta tener el criterio del proveedor.
-    res.holgura_qr = holgura_qr(solido)
+    # Sólo aviso todavía: el criterio es el de ToothFORM, pero depende de dónde
+    # quede el QR (provisorio en este marco) y de qué LimitX se usó (2.5 en el
+    # JSON de esta instalación, 3.0 en el de ejemplo del fabricante): BZ254
+    # U00-B y U01-A, que ToothFORM rechazó, dan 2,95 y 2,65 mm; BZ219-L05-A,
+    # aceptado, 4,15.
+    res.holgura_qr = pasillo_qr(solido, p)
     if res.holgura_qr < p.LimitX:
         res.avisos.append(
-            f"quedan {res.holgura_qr:.2f} mm libres alrededor del QR (LimitX {p.LimitX}); sólo aviso: "
-            "no es el criterio de ToothFORM para 'Clip limit exceeded'"
+            f"el pasillo de la pinza hacia el QR deja {res.holgura_qr:.2f} mm y LimitX es {p.LimitX}: "
+            "ToothFORM daría 'Clip limit exceeded' (sólo aviso: el marco del QR es provisorio)"
         )
     try:
         res.pieza, hueca = pieza(solido, curva, caso, modelo, p)

@@ -325,9 +325,9 @@ def test_si_fallan_la_placa_o_el_qr_es_failed_to_merge(tmp_path, arcada_stl, mon
     assert not (tmp_path / "salida" / "AB123" / "AB123-L05-A.stl").exists()
 
 
-def test_el_lugar_libre_del_qr_es_solo_aviso_y_no_rechaza(tmp_path, arcada_stl):
-    """La medida no es la de ToothFORM (BZ254-L22-A pasó con 0,80 mm y U01-A
-    fue rechazado con 1,24): con poco lugar avisa en el log y exporta igual."""
+def test_el_pasillo_del_qr_es_solo_aviso_y_no_rechaza(tmp_path, arcada_stl):
+    """El criterio es el de ToothFORM, pero el marco del QR es provisorio:
+    con poco lugar avisa en el log y exporta igual."""
     (tmp_path / "caso").mkdir()
     (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
     logs = []
@@ -336,6 +336,26 @@ def test_el_lugar_libre_del_qr_es_solo_aviso_y_no_rechaza(tmp_path, arcada_stl):
     assert r.status == "ok", r.message
     assert r.outputs["exportados"] == ["AB123-L05-A"]
     assert "Clip limit" not in r.outputs["log_texto"]
-    assert any("QR libre" in m for m in logs)
+    assert any("pasillo QR" in m for m in logs)
     assert any("sólo aviso" in m for m in logs)
     assert (tmp_path / "sale" / "AB123" / "AB123-L05-A.stl").exists()
+
+
+def test_pasillo_qr_es_el_criterio_de_toothform():
+    """Con QrSize 15: w = 8; ningún vértice en x <= 2 con |y| < 8 + LimitX."""
+    _con_librerias()
+    import numpy as np
+    import trimesh
+
+    from plugins.keep_form.enkukador import toothform as tf
+
+    p = tf.Parametros()
+    def con(*puntos):
+        return trimesh.Trimesh(np.array(puntos, float), [[0, 1, 2]], process=False)
+
+    # Un vértice en x=2, y=10.5: justo en el borde con LimitX 2.5.
+    assert tf.pasillo_qr(con((2, 10.5, 1), (30, 30, 1), (30, -30, 1)), p) == 2.5
+    # Más adelante que x=2 no cuenta (ahí está el frente de la arcada).
+    assert tf.pasillo_qr(con((2.1, 0, 1), (30, 30, 1), (30, -30, 1)), p) == float("inf")
+    # Detrás, del lado -Y, también cuenta.
+    assert tf.pasillo_qr(con((-20, -9, 1), (30, 30, 1), (30, -30, 1)), p) == 1.0

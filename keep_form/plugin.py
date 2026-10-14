@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.6",
+    version="0.1.7",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -277,7 +277,7 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
         with candado:
             hechos[0] += 1
             # La holgura del QR va siempre: con ella se calibra LimitX contra ToothFORM.
-            qr = f" (QR libre {holgura:.2f} mm)" if holgura is not None and holgura != float("inf") else ""
+            qr = f" (pasillo QR {holgura:.2f} mm)" if holgura is not None and holgura != float("inf") else ""
             ctx.log(f"{hechos[0]}/{len(rutas)} {stem}: {estado}{qr}")
         return stem, caso, estado, motivo
 
