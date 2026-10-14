@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.4",
+    version="0.1.5",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -60,6 +60,7 @@ MANIFEST = PluginManifest(
 # Los de ParameterSettings que usa la reconstrucción (enkukador.toothform.Parametros).
 _PARAMETROS_TOOTHFORM = (
     "ShellThickness", "BottomPlaneThickness", "LimitR", "LimitH", "QrSize", "Radius1", "Radius2",
+    "LimitX",
 )
 _EXT_MODELOS = (".stl", ".obj", ".ply", ".off")
 # Lo que ToothFORM deja en <modelo>-MatA.txt: dos identidades 4x4 por filas,
@@ -244,7 +245,7 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
         caso, _, modelo = stem.partition("-")
         if ctx.cancelled:
             return stem, caso, "Cancelled", "se canceló el run antes de procesarlo"
-        motivo = ""
+        motivo, holgura = "", None
         try:
             datos_stl = fs.read_bytes(ruta)
             try:
@@ -254,7 +255,7 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             if not isinstance(malla, trimesh.Trimesh) or len(malla.faces) == 0:
                 raise tf.FallaToothform(tf.FALLO_PREPROCESO, "no es una malla o está vacía")
             resultado = tf.generar(malla, caso, modelo or stem, p)
-            estado = resultado.estado
+            estado, holgura = resultado.estado, resultado.holgura_qr
             if estado in tf.EXPORTADOS:
                 resultado.pieza = _una_pieza(ctx, stem, resultado.pieza)
             destino = fs.join(salida, caso)
@@ -275,7 +276,9 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             ctx.log(f"{stem}: {motivo}", "error")
         with candado:
             hechos[0] += 1
-            ctx.log(f"{hechos[0]}/{len(rutas)} {stem}: {estado}")
+            # La holgura del QR va siempre: con ella se calibra LimitX contra ToothFORM.
+            qr = f" (QR libre {holgura:.2f} mm)" if holgura is not None and holgura != float("inf") else ""
+            ctx.log(f"{hechos[0]}/{len(rutas)} {stem}: {estado}{qr}")
         return stem, caso, estado, motivo
 
     if paralelo > 1:

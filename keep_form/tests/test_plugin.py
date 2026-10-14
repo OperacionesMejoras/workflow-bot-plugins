@@ -128,8 +128,8 @@ def test_no_toma_una_salida_como_entrada():
 
 def test_parametros_desconocidos_o_que_no_son_numeros(monkeypatch):
     fs = FakeFs(files={"D:/caso/AB123-L05-A.stl": "x"})
-    r = _exportar(fs, carpeta="D:/caso", salida="D:/salida", LimitX="2.5")
-    assert r.status == "err" and "LimitX" in r.message
+    r = _exportar(fs, carpeta="D:/caso", salida="D:/salida", ToothMinVolume="30")
+    assert r.status == "err" and "ToothMinVolume" in r.message
 
     _con_librerias()
     r = _exportar(fs, carpeta="D:/caso", salida="D:/salida", QrSize="grande")
@@ -323,3 +323,22 @@ def test_si_fallan_la_placa_o_el_qr_es_failed_to_merge(tmp_path, arcada_stl, mon
     assert r.status == "err" and r.error_kind == "modelo_fallido"
     assert r.outputs["modelos_fallidos"][0]["motivo"].startswith("Failed to merge (")
     assert not (tmp_path / "salida" / "AB123" / "AB123-L05-A.stl").exists()
+
+
+def test_clip_limit_si_no_queda_lugar_para_la_pinza_alrededor_del_qr(tmp_path, arcada_stl):
+    """'Clip limit exceeded': la pinza toma la pieza por el QR. La arcada de
+    prueba deja ~4,4 mm libres: pasa con el LimitX de siempre y no con 10."""
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale")
+    assert r.status == "ok", r.message
+    assert any("QR libre" in m for m in logs)
+
+    r = _exportar(LocalFsAdapter(root=tmp_path), carpeta="caso", salida="no-sale", LimitX="10")
+    assert r.status == "err" and r.error_kind == "modelo_fallido"
+    assert r.outputs["modelos_fallidos"][0]["motivo"] == "Clip limit exceeded"
+    assert "AB123-L05-A    Clip limit exceeded" in r.outputs["log_texto"]
+    # Como ToothFORM: sin pieza ni MatA, pero con -gum y -tooth.
+    hecho = tmp_path / "no-sale" / "AB123"
+    assert sorted(p.name for p in hecho.iterdir()) == ["AB123-L05-A-gum.stl", "AB123-L05-A-tooth.ply"]

@@ -46,6 +46,10 @@ class Parametros:
     QrSize: float = 15.0
     Radius1: float = 2.62
     Radius2: float = 2.12
+    # Lugar libre que necesita la pinza del robot alrededor de la lengüeta del
+    # QR, que es por donde toma la pieza. 2.5 en el JSON de esta instalación;
+    # el documento de ToothFORM dice que nunca menos de 2.
+    LimitX: float = 2.5
 
 
 # --- medidas fijas (BZ219-L05-A y BZ254-U05-A, iguales en los dos) ---
@@ -75,6 +79,7 @@ EXPORTADOS = (EXPORTO, MACIZO)
 FALLO_PREPROCESO = "Failed to preprocess"
 FALLO_VACIADO = "Failed to hollow"
 FALLO_UNION_QR = "Failed to merge"
+CLIP = "Clip limit exceeded"
 
 
 class FallaToothform(Exception):
@@ -93,6 +98,7 @@ class Resultado:
     matriz: np.ndarray  # entrada -> marco ToothFORM
     estado: str = EXPORTO
     avisos: list[str] = field(default_factory=list)
+    holgura_qr: float | None = None  # mm libres alrededor de la lengüeta (ver holgura_qr)
 
 
 # ------------------------------------------------------------------ marco
@@ -439,6 +445,37 @@ def encia_y_dientes(malla: trimesh.Trimesh) -> tuple[trimesh.Trimesh, trimesh.Tr
 # ------------------------------------------------------------------ todo junto
 
 
+def holgura_qr(solido: trimesh.Trimesh) -> float:
+    """Cuánto lugar libre queda alrededor de la lengüeta del QR, en mm.
+
+    "Clip limit exceeded" de ToothFORM: la pinza del robot toma la pieza por
+    el QR y necesita LimitX mm libres alrededor de la lengüeta para bajar. Se
+    mide, vista de arriba, la distancia entre la lengüeta y lo que el modelo
+    tiene por encima del relieve del QR (encía y dientes).
+
+    PROVISORIO, sacado de tres modelos: BZ219-L05-A, que ToothFORM aceptó, da
+    2,68 mm; BZ254-U00-B y U01-A, que rechazó con "Clip limit exceeded", 0,86 y
+    1,26. En los tres lo más cerca es la encía lingual de los incisivos, frente
+    a la esquina delantera de la lengüeta.
+    """
+    import shapely
+    from shapely.geometry import box
+
+    x0, x1, y0, y1 = LENGUETA
+    lengueta = box(x0, y0, x1, y1)
+    arriba = solido.slice_plane([0, 0, PLACA + RELIEVE_QR], [0, 0, 1])
+    if len(arriba.faces) == 0:
+        return float("inf")
+    tri = arriba.triangles[:, :, :2]
+    c = tri.mean(axis=1)
+    cerca = (c[:, 0] > x0 - 15) & (c[:, 0] < x1 + 15) & (c[:, 1] > y0 - 15) & (c[:, 1] < y1 + 15)
+    if not cerca.any():
+        return float("inf")
+    anillos = np.concatenate([tri[cerca], tri[cerca][:, :1]], axis=1)  # cerrados
+    d = shapely.distance(lengueta, shapely.polygons(anillos))
+    return float(np.nanmin(d))
+
+
 def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
             p: Parametros | None = None) -> Resultado:
     p = p or Parametros()
@@ -467,6 +504,14 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
     if radio > p.LimitR / 2:
         res.estado = "Radius limit exceeded"
         res.avisos.append(f"radio {radio:.2f} mm > LimitR/2 {p.LimitR / 2}")
+        return res
+    res.holgura_qr = holgura_qr(solido)
+    if res.holgura_qr < p.LimitX:
+        res.estado = CLIP
+        res.avisos.append(
+            f"quedan {res.holgura_qr:.2f} mm libres alrededor del QR y la pinza necesita LimitX {p.LimitX}: "
+            "recortar la encía lingual de los incisivos"
+        )
         return res
     try:
         res.pieza, hueca = pieza(solido, curva, caso, modelo, p)
