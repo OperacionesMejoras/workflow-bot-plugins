@@ -21,7 +21,7 @@ from dataclasses import replace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
 from backend.core.contract import ToolContext  # noqa: E402
-from backend.core.ports import PortError, ProcessResult  # noqa: E402
+from backend.core.ports import PortError  # noqa: E402
 from backend.core.registry import ToolRegistry  # noqa: E402
 from backend.tests.fakes import FakeClock, FakeFs, FakeProcess, FakeWindow  # noqa: E402
 
@@ -156,8 +156,7 @@ def test_el_plugin_carga_con_sus_cuatro_ports():
     plugin = next(p for p in reg.plugins if p.name == "toothform")
     assert set(plugin.ports) == {"process", "fs", "clock", "window"}
     assert set(reg.tool_ids) == {
-        "toothform.exportar", "toothform.enkukador", "toothform.add_qr", "toothform.check_log",
-        "toothform.toothcam_enviar",
+        "toothform.exportar", "toothform.add_qr", "toothform.check_log", "toothform.toothcam_enviar",
     }
 
 
@@ -1383,159 +1382,3 @@ def test_con_la_salida_arriba_de_la_entrada_los_stl_de_origen_no_cuentan_como_ex
     assert resultado.status == "err" and resultado.error_kind == "faltan_archivos"
     assert resultado.outputs["faltantes"] == ["QATF001-U01-A"]
     assert resultado.outputs["escritos"] == 1
-
-
-# ── enkukador: lo mismo que exportar, con Enkukador ────────────────────────
-
-ENK = "C:/Users/bot/AppData/Local/Programs/Enkukador"
-ENK_EXE = f"{ENK}/runtime/Enkukador.exe"
-CASO_ENK = "D:/casos/AB123/stl"
-
-
-class EnkukadorFalso(FakeProcess):
-    """
-    Lo que hace `python -m enkukador <entradas> --producto toothform --salida S`
-    (medido contra el CLI real el 14/10/2026): por cada modelo, en S/<ID>/,
-    `<modelo>-gum.stl` y `<modelo>-tooth.ply` siempre y `<modelo>.stl` sólo si
-    exportó; un `<fecha>.<hora>.log` en S con el formato de ToothFORM; exit 0
-    si exportaron todos y 1 si no. `estados` dice cómo le va a cada modelo;
-    `log=False` es el que se cae antes de escribir nada.
-    """
-
-    def __init__(self, fs, estados=None, log=True, exit_code=None, stderr="", escribe_stl=True):
-        super().__init__()
-        self.fs, self.estados, self.log, self.escribe_stl = fs, dict(estados or {}), log, escribe_stl
-        self.exit_code, self.stderr = exit_code, stderr
-
-    def run(self, command, *, cwd=None, timeout=None, env=None):
-        argv = [str(a) for a in command]
-        self.calls.append({"command": argv, "cwd": cwd, "timeout": timeout})
-        entradas = argv[argv.index("enkukador") + 1:argv.index("--producto")]
-        salida = argv[argv.index("--salida") + 1]
-        modelos = []
-        for entrada in entradas:
-            if entrada in self.fs.dirs:
-                modelos += sorted(e.name.rsplit(".", 1)[0] for e in self.fs.list_dir(entrada) if not e.is_dir)
-            else:
-                modelos.append(entrada.rsplit("/", 1)[-1].rsplit(".", 1)[0])
-        lineas, ok = [], 0
-        for modelo in modelos:
-            estado = self.estados.get(modelo, "Export successfully")
-            carpeta = f"{salida}/{modelo.split('-')[0]}"
-            self.fs.write_text(f"{carpeta}/{modelo}-gum.stl", "gum")
-            self.fs.write_text(f"{carpeta}/{modelo}-tooth.ply", "tooth")
-            if estado == "Export successfully" and self.escribe_stl:
-                self.fs.write_text(f"{carpeta}/{modelo}.stl", "pieza")
-            ok += estado == "Export successfully"
-            lineas.append(f"{modelo}    {estado}")
-        if self.log:
-            lineas += ["", f"Total {len(modelos)} models, of which {ok} succeeded and {len(modelos) - ok} failed"]
-            self.fs.write_text(f"{salida}/20261014.142431.log", "\n".join(lineas) + "\n")
-        codigo = self.exit_code if self.exit_code is not None else (0 if ok == len(modelos) else 1)
-        return ProcessResult(exit_code=codigo, stderr=self.stderr, command=tuple(argv))
-
-
-def _disco_enk(files=None):
-    return FsConMtimes(
-        {
-            f"{ENK_EXE}": "exe", f"{ENK}/app/enkukador/__init__.py": "",
-            f"{CASO_ENK}/AB123-L05-A.stl": "x", f"{CASO_ENK}/AB123-U05-A.stl": "x",
-            **(files or {}),
-        },
-        dirs=(SALIDA,),
-    )
-
-
-def _enkukador(fs=None, process=None, **params):
-    fs = fs or _disco_enk()
-    process = process or EnkukadorFalso(fs)
-    resultado = _registry(fs=fs, process=process).execute(
-        "toothform.enkukador",
-        _ctx_factory({"instalacion": ENK, "carpeta": CASO_ENK, "salida": SALIDA, **params}),
-    )
-    return resultado, fs, process
-
-
-def test_enkukador_corre_el_cli_con_la_carpeta_y_comprueba_la_salida():
-    resultado, fs, process = _enkukador(ShellThickness="2.0")
-
-    assert resultado.status == "ok", resultado.message
-    (llamada,) = process.calls
-    ruta_config = f"{SALIDA}/enkukador-QATF001.json"
-    assert llamada["command"] == [
-        ENK_EXE, "-m", "enkukador", CASO_ENK,
-        "--producto", "toothform", "--salida", SALIDA, "--config", ruta_config,
-    ]
-    # El paquete está en <instalacion>/app: `-m` lo encuentra desde ahí.
-    assert llamada["cwd"] == f"{ENK}/app"
-    assert json.loads(fs.files[ruta_config])["ParameterSettings"]["ShellThickness"] == "2.0"
-    o = resultado.outputs
-    assert (o["exitosos"], o["fallidos"], o["esperados"], o["escritos"]) == (2, 0, 2, 2)
-    assert o["carpeta_export"] == f"{SALIDA}/AB123"
-    assert o["hubo_log"] == "si" and o["exit_code"] == 0
-
-
-def test_enkukador_con_archivos_los_pasa_sueltos_sin_copiarlos():
-    archivo = f"{CASO_ENK}/AB123-L05-A.stl"
-    resultado, fs, process = _enkukador(carpeta="", archivos=[archivo])
-
-    assert resultado.status == "ok", resultado.message
-    comando = process.calls[0]["command"]
-    assert comando[3:comando.index("--producto")] == [archivo]
-    assert not any(c[0] == "copy_file" for c in fs.calls)
-    assert resultado.outputs["esperados"] == 1
-
-
-def test_enkukador_un_modelo_que_falla_es_err_con_su_motivo():
-    fs = _disco_enk()
-    resultado, _fs, _p = _enkukador(fs=fs, process=EnkukadorFalso(fs, {"AB123-U05-A": "Height limit exceeded"}))
-
-    assert resultado.status == "err" and resultado.error_kind == "modelo_fallido"
-    o = resultado.outputs
-    assert o["modelos_fallidos"] == [{"modelo": "AB123-U05-A", "motivo": "Height limit exceeded"}]
-    # Dejó -gum.stl y -tooth.ply de ese modelo, pero no la pieza: falta.
-    assert o["faltantes"] == ["AB123-U05-A"] and o["exit_code"] == 1
-
-
-def test_enkukador_cuenta_solo_la_pieza_no_el_gum():
-    """El log dice que salieron todos, pero en disco sólo están -gum y -tooth: es err."""
-    fs = _disco_enk()
-    resultado, _fs, _p = _enkukador(fs=fs, process=EnkukadorFalso(fs, escribe_stl=False))
-
-    assert resultado.status == "err" and resultado.error_kind == "faltan_archivos"
-    assert "Enkukador dio el export por bueno" in resultado.message
-    assert resultado.outputs["faltantes"] == ["AB123-L05-A", "AB123-U05-A"]
-
-
-def test_enkukador_sin_log_dice_lo_ultimo_de_stderr():
-    fs = _disco_enk()
-    error = "Traceback (most recent call last):\n  ...\nModuleNotFoundError: No module named 'manifold3d'\n"
-    resultado, _fs, _p = _enkukador(fs=fs, process=EnkukadorFalso(fs, log=False, exit_code=1, stderr=error))
-
-    assert resultado.status == "err" and resultado.error_kind == "sin_log"
-    assert "No module named 'manifold3d'" in resultado.message
-    assert resultado.outputs["hubo_log"] == "no"
-
-
-def test_enkukador_sin_el_programa_instalado_no_corre_nada():
-    fs = FsConMtimes({f"{CASO_ENK}/AB123-L05-A.stl": "x"}, dirs=(SALIDA,))
-    resultado, _fs, process = _enkukador(fs=fs)
-
-    assert resultado.status == "err" and resultado.error_kind == "ruta"
-    assert ENK_EXE in resultado.message
-    assert process.calls == []
-
-
-def test_enkukador_no_reprocesa_una_salida():
-    salida_vieja = "D:/casos/AB123/AB123"
-    fs = _disco_enk({f"{salida_vieja}/AB123-L05-A.stl": "p", f"{salida_vieja}/AB123-L05-A-gum.stl": "g"})
-    resultado, _fs, process = _enkukador(fs=fs, carpeta=salida_vieja)
-
-    assert resultado.status == "err" and resultado.error_kind == "entrada_exportada"
-    assert process.calls == []
-
-
-def test_enkukador_rechaza_parametros_que_no_existen():
-    resultado, _fs, process = _enkukador(Grosor="2")
-    assert resultado.status == "err" and "Grosor" in resultado.message
-    assert process.calls == []
