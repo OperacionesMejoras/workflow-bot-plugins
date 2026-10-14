@@ -1,0 +1,88 @@
+%% folder: FORM
+%% description: Como TOOTHFORM CNC4 V3, pero exporta con convertidor.toothform (la salida de ToothFORM armada adentro del Bot, sin Toothform.exe); mueve el export a la carpeta del caso y marca Apto impresion
+%%
+%% Es TOOTHFORM CNC4 V3 con un solo nodo cambiado: "Exportar" usa
+%% convertidor.toothform, que arma adentro del Bot lo que hace ToothFORM —la
+%% pieza con las referencias del robot y el QR, -gum.stl y -tooth.ply— en
+%% {toothformLogDir}\{id_externo}, con un log del mismo formato. Las salidas
+%% del nodo tienen los mismos nombres, así que el resto del flujo no cambia.
+%%
+%% Variables que no vienen de Xano y hay que darle con la fila (o por {env.*}):
+%% filesFolder = carpeta con los STL del caso; toothformLogDir = carpeta de
+%% salida (ahí caen el log y {id_externo}\ con el export); carpetaCaso =
+%% carpeta del caso adonde se mueve el export y se copia el log. A diferencia
+%% de Toothform.exe, abre rutas con acentos.
+%%
+%% "Buscar archivos" toma sólo el STL que ToothFORM carga, con el nombre de
+%% producción (el folderSearchPatterns "toothform" de Xano: id de dos letras y
+%% tres dígitos, -L/U + dos dígitos, -letra, .stl); descarta -gum, -tooth y
+%% cualquier otro derivado. Va sin cuantificadores {n} porque el núcleo leería
+%% {2} como una variable. Un caso de prueba "QATF001" no lo cumple: para QA,
+%% nombrar el STL como en producción.
+%%
+%% excluir_carpeta={id_externo}: el export lleva el mismo nombre que el
+%% original y queda en una carpeta {id_externo}; si cae adentro de
+%% {filesFolder}, un caso reprocesado encontraba su propia salida y ToothFORM
+%% se caía con 0xC0000005 (BZ219, 13/10/2026). Sólo cuentan las carpetas de
+%% abajo de {filesFolder}. Ojo si los STL originales están en una subcarpeta
+%% cuyo nombre lleva el id: ahí también quedarían afuera.
+%%
+%% "mover a carpeta del caso" va con si_existe=reemplazar: en un caso
+%% reprocesado {carpetaCaso}\{id_externo} ya existe, y sin esto el export
+%% nuevo quedaba ADENTRO del viejo ({id_externo}\{id_externo}). Borra el
+%% export anterior.
+%%
+%% Requisitos de la instalación: el plugin convertidor 0.5.0 o posterior,
+%% con sus librerías (requirements.txt); el plugin toothform no hace falta
+%% para exportar, y no hay que tocar process_allowlist.
+%%
+%% Si exportar da err hay dos casos y los separa {hubo_log}: con log, el
+%% export terminó con fallas → se copia el log al caso y se comenta; sin log,
+%% ToothFORM crasheó o no encontró la carpeta → "comentario crash".
+flowchart TD
+    SN(inicio)
+    N1009["refrescar row § connections.llamar_y_fusionar | connection=Refresh row"]
+    N1008{ES APTO QR? § sub_stage}
+    N29["Buscar archivos § archivos.buscar | carpeta={filesFolder}, patron=^[A-Z][A-Z]\d\d\d-[LU]\d\d-[A-Z]\.stl$, excluir_carpeta={id_externo}"]
+    N1005["Comentario no hay carpeta en CASOS TERMINADOS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=BOT - No se encontraron los casos renombrados para TOOTHFORM, pais={pais}"]
+    EXP["Exportar como ToothFORM § convertidor.toothform | carpeta={filesFolder}, salida={toothformLogDir}"]
+    N5["OK - continuar § core.log | message=Export completado, level=info"]
+    D_LOG{hubo log? § hubo_log}
+    COMP_FILES["Comprobar cantidad § archivos.comparar_conteo | carpeta_a={toothformLogDir}\{id_externo}, carpeta_b={filesFolder}, etiqueta=toothform"]
+    ERR_COMP["Error conteo § core.log | message=Faltan archivos exportados, level=error"]
+    MF["mover a carpeta del caso § archivos.mover | origen={toothformLogDir}\{id_externo}, destino={carpetaCaso}\{id_externo}, si_existe=reemplazar"]
+    N1003["NOLOCO - Apto impreison § connections.llamar | connection=Apto impresion"]
+    N1000["copiar archivo § archivos.copiar | origen={toothformLogDir}\{checkLogResult.log_file}, destino={carpetaCaso}\{checkLogResult.log_file}"]
+    N1004["Revision Impresion digital § connections.llamar | connection=Revision impresion digital"]
+    N1001["comentario noloco § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto={checkLogResult.message} log: - {checkLogResult.log_file} - en carpeta del caso, pais={pais}"]
+    N1006["estatus error § core.set_status | status=err"]
+    N1007["comentario crash § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=Crasheo el toothform, pais={pais}"]
+    N1011{Es KIDS? § tratamiento_intranet}
+    N1012["COMENTARIO KIDS § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=Es KIDS, pais={pais}"]
+    N1013{ES 3a3? § feston}
+    N1014["COMENTARIO FESTON 3a3 § connections.llamar | connection=Comentario noloco, id_externo={id_externo}, texto=ES FESTON 3 a 3, pais={pais}"]
+    SN -->N1009
+    N1009 -->N1013
+    N1008 -->|Apto QR| N29
+    N29 -->|ok| EXP
+    N29 -->|err| N1005
+    N1005 -->N1004
+    EXP -->|ok| N5
+    EXP -->|err| D_LOG
+    D_LOG -->|si| N1000
+    D_LOG -->N1007
+    N5 -->COMP_FILES
+    COMP_FILES -->|ok| MF
+    COMP_FILES -->|err| ERR_COMP
+    ERR_COMP -->N1006
+    MF -->N1003
+    N1000 -->N1001
+    N1001 -->N1004
+    N1004 -->N1006
+    N1007 -->N1004
+    N1011 -->N1008
+    N1011 -->|Kids, Kids Full, Kids Medium, Kids Fast, Kids Full RC| N1012
+    N1012 -->N1004
+    N1013 -->N1011
+    N1013 -->|Feston: De 3 a 3| N1014
+    N1014 -->N1004

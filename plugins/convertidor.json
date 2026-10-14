@@ -1,6 +1,6 @@
 {
   "name": "convertidor",
-  "description": "Renombrar STL/PTS entre convenciones (regex + template), corregir puntos contra una malla e inspeccionar/extraer volúmenes de mallas multi-parte, con variantes batch en paralelo.",
+  "description": "Renombrar STL/PTS entre convenciones (regex + template), corregir puntos contra una malla, inspeccionar/extraer volúmenes de mallas multi-parte, con variantes batch en paralelo, y exportar como ToothFORM (pieza con referencias del robot y QR, -gum.stl, -tooth.ply) sin ToothFORM.",
   "source": "workflow-bot-plugin-convertidor",
   "path": "convertidor",
   "ports": [
