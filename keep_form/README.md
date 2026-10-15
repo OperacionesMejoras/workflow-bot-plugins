@@ -74,3 +74,21 @@ modelo sigue siendo el de antes de la muesca (el que se compara con
 ToothFORM); el aviso dice de qué lado, cuánto de profundo y de alto, cuánto
 sacó y cuánto queda desde el piso. La cuña pasa el margen más allá de x = 2
 para que la pared que queda en ese plano no siga contando.
+
+## Type3: un solo shell más `.pts` (0.3.0, hipotético)
+
+Con `tipo=Type3` el tool hace lo que hace ToothFORM con ese tipo, leído del
+binario (`Toothform.exe` 0x418d50 y 0x41d8c1–0x41de77; ver `enkukador/toothform.py`):
+
+- Entrada: un STL de un solo shell (encía y dientes fundidos) y `<modelo>.pts`
+  al lado. Sin el `.pts`: estado "Pts file not found!".
+- Al cargar se descartan las componentes de menos de 100 caras. No se
+  separan dientes: la pieza y `-gum.stl` salen del shell entero. No hay
+  `-tooth.ply`.
+- El `.pts` es texto, un punto por línea, campos por espacios (o por
+  tabulaciones si no llega a 3); los tres primeros son x y z, el resto se
+  ignora. Se le aplica la misma matriz que al modelo y sale como
+  `<modelo>-pts.pts`, "x y z" con 6 cifras significativas y CRLF.
+- `-mark.txt` (ImportExtPos=1) no está: la instalación lo tiene en 0.
+
+Falta validarlo con un caso real (STL, `.pts` y la salida de ToothFORM).

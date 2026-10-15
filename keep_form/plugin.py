@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.2.0",
+    version="0.3.0",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -96,6 +96,13 @@ EXPORTAR = ToolManifest(
         Param("carpeta", ParamType.PATH, default="", doc="Carpeta con los modelos: TODOS los .stl/.obj/.ply/.off de adentro. Alternativa a 'archivos'."),
         Param("archivos", ParamType.JSON, default=[], doc="Alternativa a 'carpeta': sólo estos archivos (ej. {rutas} de 'buscar')."),
         Param("salida", ParamType.PATH, required=True, doc="Carpeta de salida: ahí caen el log y <ID>\\ con el export."),
+        Param(
+            "tipo", ParamType.STR, default="Type1",
+            doc="Tipo de dato de ToothFORM: 'Type1' (encía y dientes como piezas separadas) o "
+            "'Type3' (un solo shell más <modelo>.pts al lado; sale -pts.pts con los puntos en el "
+            "marco de la pieza y no sale -tooth.ply). Type3 está armado según el binario y falta "
+            "validarlo con un caso real.",
+        ),
         Param(
             "paralelo", ParamType.INT, default=1,
             doc="Cuántos modelos a la vez (hasta 8). Con 2 es ~1,35 veces más rápido; cada uno "
@@ -193,6 +200,9 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             "ni ninguna" if carpeta else "hace falta 'carpeta' o 'archivos'"
         )
 
+    tipo = str(ctx.params.get("tipo") or "Type1").strip() or "Type1"
+    if tipo not in ("Type1", "Type3"):
+        return ToolResult.err(f"'tipo' tiene que ser Type1 o Type3, no '{tipo}' (Type2, 3shape y onyxceph no están)")
     numeros = {}
     for clave, valor in ctx.extras.items():
         try:
@@ -261,7 +271,14 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
                 raise tf.FallaToothform(tf.FALLO_PREPROCESO, f"no se pudo leer: {type(exc).__name__}: {exc}") from exc
             if not isinstance(malla, trimesh.Trimesh) or len(malla.faces) == 0:
                 raise tf.FallaToothform(tf.FALLO_PREPROCESO, "no es una malla o está vacía")
-            resultado = tf.generar(malla, caso, modelo or stem, p)
+            puntos = None
+            if tipo == "Type3":
+                # Como ToothFORM: el .pts tiene que estar al lado, con el mismo nombre.
+                ruta_pts = ruta[: -len(ext) - 1] + ".pts"
+                if not fs.exists(ruta_pts):
+                    raise tf.FallaToothform(tf.SIN_PTS, f"falta {fs.basename(ruta_pts)} al lado del modelo")
+                puntos = tf.leer_pts(fs.read_bytes(ruta_pts).decode("utf-8", "replace"))
+            resultado = tf.generar(malla, caso, modelo or stem, p, tipo)
             estado, holgura = resultado.estado, resultado.holgura_qr
             if estado in tf.EXPORTADOS:
                 resultado.pieza = _una_pieza(ctx, stem, resultado.pieza)
@@ -271,6 +288,9 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
                 fs.write_bytes(fs.join(destino, archivo), datos)
             if estado in tf.EXPORTADOS:
                 fs.write_bytes(fs.join(destino, f"{stem}-MatA.txt"), _MATA)
+                if puntos is not None:
+                    fs.write_bytes(fs.join(destino, f"{stem}-pts.pts"), tf.escribir_pts(puntos, resultado.matriz))
+                    ctx.log(f"{stem}: {len(puntos)} puntos del .pts llevados al marco de la pieza (-pts.pts)")
             for aviso in resultado.avisos:
                 ctx.log(f"{stem}: {aviso}", "warning")
         except PortError:

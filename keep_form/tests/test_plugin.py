@@ -468,3 +468,78 @@ def test_la_muesca_tiene_limites_y_si_no_se_puede_es_clip_limit(tmp_path):
     assert r.status == "err" and "diente" in r.outputs["modelos_fallidos"][0]["motivo"]
     r, logs = corrida()
     assert r.status == "ok" and not any("muesca" in m for m in logs) and any("sólo aviso" in m for m in logs)
+
+
+def _solido_unico():
+    """La arcada de arriba fundida en un solo shell (Type3): encía y dientes unidos."""
+    import trimesh
+
+    malla = _arcada_con_dientes()
+    malla.vertices[malla.vertices[:, 2] > 13.9, :2] *= 0.99
+    piezas = malla.split(only_watertight=False)
+    encia = max(piezas, key=lambda q: q.area)
+    for d in piezas:
+        if d is not encia:
+            encia = encia.union(d, engine="manifold")
+    return encia
+
+
+def test_type3_un_solo_shell_mas_pts(tmp_path):
+    """Type3 (leído del binario, sin par real todavía): un STL de un solo shell
+    y <modelo>.pts al lado. Sale la pieza, -gum.stl con el shell entero, sin
+    -tooth.ply, y -pts.pts con los puntos llevados al marco de la pieza con la
+    misma matriz que el modelo. Sin el .pts: 'Pts file not found!'."""
+    _con_librerias()
+    import numpy as np
+    import trimesh
+
+    from plugins.keep_form.enkukador import toothform as tf
+
+    solido = _solido_unico()
+    assert len(solido.split(only_watertight=False)) == 1
+    # Un pedacito suelto de menos de 100 caras: ToothFORM lo descarta al cargar.
+    basura = trimesh.creation.box((1, 1, 1))
+    basura.apply_translation([60, 60, 5])
+    entrada = trimesh.util.concatenate([solido, basura])
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-U05-A.stl").write_bytes(entrada.export(file_type="stl"))
+    # Puntos "x y z" (con campos de más, que se ignoran) y una línea con tabulaciones.
+    v = solido.vertices
+    puntos = np.array([v[0], v[len(v) // 2], [1.5, -2.25, 3.0]])
+    texto = f"{puntos[0,0]} {puntos[0,1]} {puntos[0,2]} 7 etiqueta\n\n{puntos[1,0]}\t{puntos[1,1]}\t{puntos[1,2]}\n1.5 -2.25 3\n"
+    (tmp_path / "caso" / "AB123-U05-A.pts").write_text(texto)
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale", tipo="Type3")
+
+    assert r.status == "ok", r.message
+    assert r.outputs["exportados"] == ["AB123-U05-A"]
+    salida = tmp_path / "sale" / "AB123"
+    assert (salida / "AB123-U05-A.stl").exists() and (salida / "AB123-U05-A-gum.stl").exists()
+    assert not (salida / "AB123-U05-A-tooth.ply").exists()
+    gum = trimesh.load(salida / "AB123-U05-A-gum.stl", force="mesh")
+    assert gum.bounds[1][2] > 12  # el shell entero, con los "dientes", cortado en z=0
+    assert gum.bounds[0][2] > -1e-6 and gum.bounds[1][0] < 59  # sin la basura
+    M, _ = tf.marco(solido)
+    esperado = puntos @ M[:3, :3].T + M[:3, 3]
+    lineas = (salida / "AB123-U05-A-pts.pts").read_bytes().split(b"\r\n")
+    assert lineas[-1] == b"" and len(lineas) == 4
+    leido = np.array([[float(c) for c in l.split(b" ")] for l in lineas[:3]])
+    assert np.abs(leido - esperado).max() < 1e-3  # 6 cifras significativas
+    assert any("3 puntos del .pts" in m for m in logs)
+
+    (tmp_path / "caso" / "AB123-U05-A.pts").unlink()
+    r = _exportar(LocalFsAdapter(root=tmp_path), carpeta="caso", salida="sale2", tipo="Type3")
+    assert r.status == "err"
+    assert r.outputs["modelos_fallidos"][0]["motivo"].startswith("Pts file not found!")
+    assert "AB123-U05-A    Pts file not found!" in r.outputs["log_texto"]
+    r = _exportar(LocalFsAdapter(root=tmp_path), carpeta="caso", salida="sale3", tipo="Type2")
+    assert r.status == "err" and "Type2" in r.message
+
+
+def test_leer_pts_como_toothform():
+    _con_librerias()
+    from plugins.keep_form.enkukador import toothform as tf
+
+    p = tf.leer_pts("1 2 3\r\n4\t5\t6\t7\n  8   9   10 \nsolo dos 1\n1.5e1 x 2\n")
+    # "solo dos 1" tiene 3 campos: atof de lo que no es número da 0, como en ToothFORM
+    assert p.tolist() == [[1, 2, 3], [4, 5, 6], [8, 9, 10], [0.0, 0.0, 1.0], [15.0, 0.0, 2.0]]
