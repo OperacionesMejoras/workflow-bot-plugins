@@ -1,0 +1,69 @@
+# keep-form
+
+Reemplazo en proceso de ToothFORM, hecho sobre Enkukador: toma el STL de
+Enkukador y saca la pieza para imprimir (hueca, con placa, agujeros del robot,
+llave, QR en relieve y texto), la encía y los dientes, con el marco y los
+controles de ToothFORM (leídos del binario, release 20260518). El detalle está
+en `enkukador/toothform.py`.
+
+## Pendiente: muesca del pasillo de la pinza (anotado 15/10/2026)
+
+Hoy el control de "Clip limit" sólo avisa. La idea es que, cuando el pasillo
+no da, keep-form abra el lugar en la encía en vez de rechazar, y que rechace
+recién cuando ni así se pueda.
+
+**Qué es.** La garra del robot toma la pieza por la lengüeta del QR, cerrando
+en Y por los costados (±8 mm) y entrando desde atrás por la parte abierta de
+la U. ToothFORM exige LimitX (2,5) libre de cada lado en x ≤ 2 (`pasillo_qr`).
+Cuando una pared palatina invade ese pasillo, se le saca a la encía un prisma
+y los dientes no se tocan.
+
+**Geometría del prisma (decidido con Leandro):**
+
+- Zona: x ≤ 10 − (QrSize+1)/2 = 2, la misma del control de ToothFORM. Un
+  prisma por lado, sólo del lado que invade (hasta ahora siempre uno).
+- Piso: **a la altura del QR**, z = PLACA + RELIEVE_QR = 3,2 mm (la cara
+  superior del QR). Por debajo la garra ya está en su lugar y la encía queda
+  como está. A confirmar si es la cara del QR (3,2) o la de la placa (2,4):
+  cambia la profundidad en 0,05 mm.
+- Cara: **inclinada 2°** respecto de la vertical, por la orientación del
+  termoformado: el hueco de la U se tiene que ensanchar hacia arriba para
+  desmoldar. La cara queda en |y| = 8 + LimitX + margen + (z − 3,2)·tan 2°.
+  La encía misma va a unos 4°, así que la cuña se afina sola hasta salir de
+  la pared y no deja ningún escalón arriba. Abajo queda un escalón de 0,2 a
+  0,3 mm mirando hacia arriba, en z = 3,2, que no es contrasalida.
+- Margen sobre LimitX: 0,3 mm (configurable), es decir pasillo final ≥ 2,8.
+- Cuándo: sólo si el pasillo medido es menor que LimitX; los modelos que
+  ToothFORM acepta salen idénticos. Se hace sobre la encía, antes del vaciado
+  (la cáscara de 1,8 sigue el contorno nuevo) y `-gum.stl` sale con la muesca.
+  El log dice de qué lado, cuánto de profundo y cuánto de alto.
+
+**Tolerancia y límites (error "Clip limit exceeded" con el detalle):**
+
+1. **Toca diente: no va.** Si la cuña intersecta cualquier pieza de dientes
+   (volumen de la intersección > 0) o queda a menos de 2 mm del diente más
+   cercano, error. En los casos reales la muesca queda a 3,5–6,4 mm.
+2. **Tolerancia de profundidad: LimitX − pasillo ≤ 1,0 mm** (propuesto;
+   configurable). Los rechazados reales piden 0,05–0,15 mm, que con el margen
+   son muescas de 0,15 a 0,45 mm. Más de 1 mm quiere decir que el QR quedó
+   mal ubicado respecto de la arcada, y la muesca sería un tajo: error.
+3. **Altura: la cuña tiene que salir de la pared a menos de 8 mm sobre el
+   piso** (propuesto; configurable). Si la pared no se abre, la cuña sube
+   hasta el margen gingival aunque la profundidad sea chica: error. En los
+   casos reales sale a 2,8–4,8 mm.
+
+**Medido en los casos reales** (margen 0,3; 2°; piso 3,2; lado −Y en todos):
+
+| Modelo | Pasillo | Prof. al piso | Sale en z | Alto | Sacado | Diente más cercano | ToothFORM |
+|---|---|---|---|---|---|---|---|
+| BZ254-U00-B | 2,45 | 0,20 mm | 8,0 | 4,8 mm | 2,4 mm³ | 5,1 mm | Clip |
+| BZ254-U01-A | 2,44 | 0,15 mm | 6,0 | 2,8 mm | 0,7 mm³ | 6,4 mm | Clip |
+| BZ219-U00-B | 2,37 | 0,26 mm | 6,0 | 2,8 mm | 2,1 mm³ | 3,7 mm | aceptó por 0,05 |
+
+Con el piso en z = 0 la cuña es más profunda (0,35–0,43) y más alta (6–8,4
+mm), por eso el piso a la altura del QR. La cuña de 2° es 1,5 a 2 veces más
+alta que un corte vertical, pero más fina arriba.
+
+Parámetros propuestos (`Parametros`): `AbrirPasillo` (apagado por defecto
+hasta validar), `PasilloMargen` 0,3, `PasilloGrados` 2, `PasilloPiso` 3,2,
+`PasilloTolerancia` 1,0, `PasilloAltoMax` 8, `PasilloDiente` 2.
