@@ -6,11 +6,13 @@ llave, QR en relieve y texto), la encía y los dientes, con el marco y los
 controles de ToothFORM (leídos del binario, release 20260518). El detalle está
 en `enkukador/toothform.py`.
 
-## Pendiente: muesca del pasillo de la pinza (anotado 15/10/2026)
+## Muesca del pasillo de la pinza (0.2.0, anotado 15/10/2026)
 
-Hoy el control de "Clip limit" sólo avisa. La idea es que, cuando el pasillo
-no da, keep-form abra el lugar en la encía en vez de rechazar, y que rechace
-recién cuando ni así se pueda.
+Apagada por defecto: con `AbrirPasillo=1` como param extra, cuando el pasillo
+no da keep-form abre el lugar en la encía en vez de avisar, y da 'Clip limit
+exceeded' recién cuando ni así se puede (`abrir_pasillo` en
+`enkukador/toothform.py`). Sin `AbrirPasillo`, el control sigue siendo sólo
+aviso, como en 0.1.9.
 
 **Qué es.** La garra del robot toma la pieza por la lengüeta del QR, cerrando
 en Y por los costados (±8 mm) y entrando desde atrás por la parte abierta de
@@ -64,6 +66,11 @@ Con el piso en z = 0 la cuña es más profunda (0,35–0,43) y más alta (6–8,
 mm), por eso el piso a la altura del QR. La cuña de 2° es 1,5 a 2 veces más
 alta que un corte vertical, pero más fina arriba.
 
-Parámetros propuestos (`Parametros`): `AbrirPasillo` (apagado por defecto
-hasta validar), `PasilloMargen` 0,3, `PasilloGrados` 2, `PasilloPiso` 3,2,
-`PasilloTolerancia` 1,0, `PasilloAltoMax` 8, `PasilloDiente` 2.
+Parámetros (params extra del tool, como los de ParameterSettings):
+`AbrirPasillo` 0/1 (apagado por defecto hasta validar), `PasilloMargen` 0,3,
+`PasilloGrados` 2, `PasilloPiso` 3,2, `PasilloTolerancia` 1,0,
+`PasilloAltoMax` 8, `PasilloDiente` 2. En el log, el "pasillo QR" de cada
+modelo sigue siendo el de antes de la muesca (el que se compara con
+ToothFORM); el aviso dice de qué lado, cuánto de profundo y de alto, cuánto
+sacó y cuánto queda desde el piso. La cuña pasa el margen más allá de x = 2
+para que la pared que queda en ese plano no siga contando.

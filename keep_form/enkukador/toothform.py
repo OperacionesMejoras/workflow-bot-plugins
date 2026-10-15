@@ -53,6 +53,15 @@ class Parametros:
     # el documento de ToothFORM dice que nunca menos de 2; 3.0 en el JSON de
     # ejemplo del fabricante. Hoy sólo decide si se avisa (ver pasillo_qr).
     LimitX: float = 2.5
+    # --- muesca del pasillo de la pinza (de keep-form, no de ToothFORM; ver
+    # abrir_pasillo). AbrirPasillo 0/1: apagada hasta validarla en producción.
+    AbrirPasillo: float = 0.0
+    PasilloMargen: float = 0.3  # mm sobre LimitX que deja la muesca
+    PasilloGrados: float = 2.0  # inclinación de la cara, abriéndose hacia arriba
+    PasilloPiso: float = 3.2  # z donde empieza: la cara del QR (PLACA + RELIEVE_QR)
+    PasilloTolerancia: float = 1.0  # como mucho LimitX - pasillo; si no, error
+    PasilloAltoMax: float = 8.0  # la cuña tiene que salir de la pared antes
+    PasilloDiente: float = 2.0  # distancia mínima de la muesca a un diente
 
 
 # --- medidas fijas (BZ219-L05-A y BZ254-U05-A, iguales en los dos) ---
@@ -108,6 +117,26 @@ class Resultado:
     estado: str = EXPORTO
     avisos: list[str] = field(default_factory=list)
     holgura_qr: float | None = None  # margen del pasillo de la pinza hacia el QR (ver pasillo_qr)
+    muesca: "Muesca | None" = None  # si se abrió el pasillo en la encía (ver abrir_pasillo)
+
+
+@dataclass
+class Muesca:
+    """Lo que se le sacó a la encía para abrir el pasillo de la pinza."""
+
+    lado: int  # +1 (+Y) o -1 (-Y)
+    pasillo_antes: float
+    pasillo_despues: float  # medido desde PasilloPiso para arriba
+    profundidad: float  # mm al piso
+    alto: float  # mm sobre el piso hasta donde la cuña sale de la pared
+    volumen: float  # mm3 sacados
+    x: tuple[float, float]
+    piso: float
+
+    def __str__(self) -> str:
+        return (f"lado {'+Y' if self.lado > 0 else '-Y'}, {self.profundidad:.2f} mm de profundo y "
+                f"{self.alto:.1f} mm de alto sobre z={self.piso:g}, x {self.x[0]:.1f}..{self.x[1]:.1f}, "
+                f"{self.volumen:.1f} mm3")
 
 
 # ------------------------------------------------------------------ marco
@@ -508,10 +537,123 @@ def encia_y_dientes(malla: trimesh.Trimesh) -> tuple[trimesh.Trimesh, trimesh.Tr
     return encia, trimesh.util.concatenate(dientes) if dientes else trimesh.Trimesh()
 
 
+# ------------------------------------------------------------------ muesca del pasillo
+
+
+def _cerrada(pieza: trimesh.Trimesh):
+    """Manifold de una pieza; si no es cerrada, el mismo arreglo que hueco.unir."""
+    try:
+        return _mf(pieza)
+    except ValueError:
+        q = pieza.copy()
+        q.merge_vertices()
+        q.fill_holes()
+        if q.volume < 0:
+            q.invert()
+        return _mf(q)
+
+
+def _cuna(lado: int, x0: float, x1: float, y0: float, z0: float, z1: float, grados: float):
+    """Prisma a lo largo de X entre x0 y x1, con sección en (y, z): del eje
+    (y = 0) hasta la cara inclinada, que está en |y| = y0 en z0 y se abre
+    `grados` hacia arriba hasta z1."""
+    tg = np.tan(np.radians(grados))
+    ys = lado * np.array([y0, 0.0, 0.0, y0 + (z1 - z0) * tg])
+    zs = np.array([z0, z0, z1, z1])
+    puntos = np.array([(x, y, z) for x in (x0, x1) for y, z in zip(ys, zs)])
+    return _mf(trimesh.convex.convex_hull(puntos))
+
+
+def abrir_pasillo(m: trimesh.Trimesh, p: Parametros) -> tuple[trimesh.Trimesh, Muesca | None]:
+    """Si el pasillo de la pinza no llega a LimitX, le saca a la encía una cuña
+    para que llegue a LimitX + PasilloMargen; devuelve (malla, muesca) o
+    (m, None) si no hacía falta. FallaToothform(CLIP) si no se puede.
+
+    La malla viene ya en el marco de ToothFORM (encía y dientes como piezas
+    separadas, sin cortar). La cuña es un prisma a lo largo de X en la zona
+    del control (x <= 10 - w), del lado que invade: empieza en PasilloPiso (la
+    cara del QR: por debajo la garra ya está en su lugar) y su cara está
+    inclinada PasilloGrados abriéndose hacia arriba, el sentido de desmoldeo
+    del termoformado, así se afina hasta salir sola de la pared, que va a unos
+    4°. Sólo toca la encía, y se hace antes de vaciar: la cáscara sigue el
+    contorno nuevo y -gum.stl sale con la muesca.
+
+    No se abre, y es "Clip limit exceeded", cuando:
+    - hay un diente dentro del pasillo, o la muesca queda a menos de
+      PasilloDiente de un diente;
+    - falta más que PasilloTolerancia (LimitX - pasillo): la muesca sería un
+      tajo, el QR quedó mal ubicado respecto de la arcada;
+    - la cuña no sale de la pared antes de PasilloAltoMax sobre el piso: la
+      pared no se abre y la muesca subiría hasta el margen gingival.
+    Medido en BZ254-U00-B, U01-A y BZ219-U00-B (pasillos 2,37-2,45): muescas
+    de 0,15-0,26 mm de profundo y 2,8-4,8 mm de alto, a 3,7-6,4 mm de los
+    dientes (README de keep-form).
+    """
+    from scipy.spatial import cKDTree
+
+    w = (p.QrSize + 1.0) * 0.5
+    piezas = sorted(m.split(only_watertight=False), key=lambda q: -q.area)
+    encia, dientes = piezas[0], piezas[1:]
+    # El pasillo de antes se mide como en generar (encía cortada en z=0, con
+    # los vértices nuevos del corte): es el número que se compara con ToothFORM.
+    em = _cerrada(encia)
+    antes = min(pasillo_qr(_tm(em.trim_by_plane((0, 0, 1), 0.0)), p),
+                *(pasillo_qr(d, p) for d in dientes))
+    if antes >= p.LimitX:
+        return m, None
+    if p.LimitX - antes > p.PasilloTolerancia:
+        raise FallaToothform(
+            CLIP, f"el pasillo deja {antes:.2f} mm y LimitX es {p.LimitX}: faltan {p.LimitX - antes:.2f}, "
+            f"más que PasilloTolerancia {p.PasilloTolerancia}; no se abre la muesca")
+    dv = np.vstack([d.vertices for d in dientes]) if dientes else np.empty((0, 3))
+    if len(dv) and pasillo_qr(trimesh.Trimesh(dv, process=False), p) < p.LimitX:
+        raise FallaToothform(CLIP, f"hay un diente dentro del pasillo de la pinza (pasillo {antes:.2f} mm)")
+    y0, tg, z0 = w + p.LimitX + p.PasilloMargen, np.tan(np.radians(p.PasilloGrados)), p.PasilloPiso
+    # La cuña pasa el margen más allá de x = 10 - w: si terminara justo ahí, la
+    # pared que queda en ese plano seguiría contando para el control.
+    x1 = 10.0 - w + p.PasilloMargen
+    v = encia.vertices
+    zona = (v[:, 0] <= x1) & (v[:, 2] >= z0) & (np.abs(v[:, 1]) < y0 + (v[:, 2] - z0) * tg)
+    lados = [l for l in (-1, 1) if (zona & (l * v[:, 1] > 0)).any()]
+    if not lados:
+        # Invade sólo por debajo del piso: ahí la garra ya está en su lugar.
+        return m, None
+    dm = [_cerrada(d) for d in dientes]
+    muescas = []
+    for lado in lados:
+        sel = v[zona & (lado * v[:, 1] > 0)]
+        alto = float(sel[:, 2].max() - z0)
+        if alto > p.PasilloAltoMax:
+            raise FallaToothform(
+                CLIP, f"la cuña del lado {'+Y' if lado > 0 else '-Y'} no sale de la pared hasta {alto:.1f} mm "
+                f"sobre z={z0:g}, más que PasilloAltoMax {p.PasilloAltoMax} (pasillo {antes:.2f} mm)")
+        if len(dv):
+            d = float(cKDTree(dv).query(sel)[0].min())
+            if d < p.PasilloDiente:
+                raise FallaToothform(
+                    CLIP, f"la muesca del lado {'+Y' if lado > 0 else '-Y'} quedaría a {d:.2f} mm de un diente, "
+                    f"menos que PasilloDiente {p.PasilloDiente} (pasillo {antes:.2f} mm)")
+        cuna = _cuna(lado, float(v[:, 0].min()) - 1.0, x1, y0, z0, z0 + alto + 1.0, p.PasilloGrados)
+        if any((d ^ cuna).volume() > 1e-6 for d in dm):
+            raise FallaToothform(CLIP, f"la cuña del lado {'+Y' if lado > 0 else '-Y'} toca un diente (pasillo {antes:.2f} mm)")
+        sacado = em.volume()
+        em = em - cuna
+        sacado -= em.volume()
+        muescas.append(Muesca(lado, antes, 0.0, float((y0 + (sel[:, 2] - z0) * tg - np.abs(sel[:, 1])).max()),
+                              alto, sacado, (float(sel[:, 0].min()), float(sel[:, 0].max())), z0))
+    nueva = trimesh.util.concatenate([_tm(em), *dientes])
+    # Lo que quedó, por encima del escalón del piso (sus vértices están en z0).
+    despues = pasillo_qr(nueva, p, desde_z=z0 + 1e-3)
+    for mu in muescas:
+        mu.pasillo_despues = despues
+    # Si invade de los dos lados (no pasó nunca) queda la de más profundidad.
+    return nueva, max(muescas, key=lambda mu: mu.profundidad)
+
+
 # ------------------------------------------------------------------ todo junto
 
 
-def pasillo_qr(solido: trimesh.Trimesh, p: Parametros) -> float:
+def pasillo_qr(solido: trimesh.Trimesh, p: Parametros, desde_z: float = 0.0) -> float:
     """Margen del pasillo de la pinza hacia el QR, en mm: "Clip limit exceeded"
     de ToothFORM si es menor que LimitX.
 
@@ -531,7 +673,7 @@ def pasillo_qr(solido: trimesh.Trimesh, p: Parametros) -> float:
     """
     w = (p.QrSize + 1.0) * 0.5
     v = solido.vertices
-    atras = v[v[:, 0] <= 10.0 - w]
+    atras = v[(v[:, 0] <= 10.0 - w) & (v[:, 2] >= desde_z)]
     if len(atras) == 0:
         return float("inf")
     return float(np.abs(atras[:, 1]).min() - w)
@@ -542,15 +684,20 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
     p = p or Parametros()
     # Todo lo de antes de vaciar (marco, encía y dientes, unión) es el
     # "preprocesamiento" de ToothFORM: si falla, no hay pieza.
+    muesca = None
     try:
         M, curva = marco(malla, p)
         m = malla.copy()
         m.apply_transform(M)
+        if p.AbrirPasillo:
+            m, muesca = abrir_pasillo(m, p)
         encia, dientes = encia_y_dientes(m)
         solido = _tm(_mf(hueco.unir(m)).trim_by_plane((0, 0, 1), 0.0))
+    except FallaToothform:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise FallaToothform(FALLO_PREPROCESO, f"{type(exc).__name__}: {exc}") from exc
-    res = Resultado(pieza=solido, encia=encia, dientes=dientes, matriz=M)
+    res = Resultado(pieza=solido, encia=encia, dientes=dientes, matriz=M, muesca=muesca)
 
     # Límites de la máquina: se chequean antes de armar la pieza.
     alto = float(solido.bounds[1][2])
@@ -576,7 +723,15 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
     # ToothFORM sale de 7 rectas que a veces agarran o sueltan una pared por
     # décimas (BZ219-U00-B: 2,36 acá, 2,55 en ToothFORM, aceptado).
     res.holgura_qr = pasillo_qr(solido, p)
-    if res.holgura_qr < p.LimitX:
+    if muesca is not None:
+        # El pasillo del log es el de antes, que es el que se compara con
+        # ToothFORM; lo que quedó se mide desde el piso de la muesca.
+        res.holgura_qr = muesca.pasillo_antes
+        res.avisos.append(
+            f"el pasillo de la pinza hacia el QR dejaba {muesca.pasillo_antes:.2f} mm y LimitX es {p.LimitX}: "
+            f"se abrió una muesca en la encía ({muesca}); queda {muesca.pasillo_despues:.2f} mm desde z={p.PasilloPiso:g}"
+        )
+    elif res.holgura_qr < p.LimitX:
         res.avisos.append(
             f"el pasillo de la pinza hacia el QR deja {res.holgura_qr:.2f} mm y LimitX es {p.LimitX}: "
             + ("al límite, ToothFORM puede aceptarlo o rechazarlo" if p.LimitX - res.holgura_qr < AL_LIMITE

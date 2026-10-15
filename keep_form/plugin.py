@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.1.9",
+    version="0.2.0",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -57,10 +57,13 @@ MANIFEST = PluginManifest(
 )
 
 
-# Los de ParameterSettings que usa la reconstrucción (enkukador.toothform.Parametros).
+# Los de ParameterSettings que usa la reconstrucción y los de la muesca del
+# pasillo (enkukador.toothform.Parametros).
 _PARAMETROS_TOOTHFORM = (
     "ShellThickness", "BottomPlaneThickness", "LimitR", "LimitH", "QrSize", "Radius1", "Radius2",
     "LimitX",
+    "AbrirPasillo", "PasilloMargen", "PasilloGrados", "PasilloPiso", "PasilloTolerancia",
+    "PasilloAltoMax", "PasilloDiente",
 )
 _EXT_MODELOS = (".stl", ".obj", ".ply", ".off")
 # Lo que ToothFORM deja en <modelo>-MatA.txt: dos identidades 4x4 por filas,
@@ -82,6 +85,10 @@ EXPORTAR = ToolManifest(
         "que las de 'toothform.exportar', así que en un flujo se cambia ese nodo por éste. "
         "Corre adentro del Bot, un modelo detrás de otro (unos segundos cada uno). Los "
         "parámetros de ParameterSettings van como params extra (ej. ShellThickness=2.0). "
+        "Con AbrirPasillo=1, si el pasillo de la pinza hacia el QR no llega a LimitX, abre una "
+        "muesca en la encía (sin tocar dientes) en vez de avisar, y da 'Clip limit exceeded' "
+        "sólo si ni así se puede (PasilloMargen, PasilloGrados, PasilloPiso, PasilloTolerancia, "
+        "PasilloAltoMax, PasilloDiente). "
         "Es la parte de ToothFORM de Enkukador (OperacionesMejoras/Enkukador-keepsmiling); "
         "algunas medidas están marcadas ahí como provisorias."
     ),

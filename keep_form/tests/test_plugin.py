@@ -384,3 +384,87 @@ def test_pasillo_qr_es_el_criterio_de_toothform():
     assert tf.pasillo_qr(con((2.1, 0, 1), (30, 30, 1), (30, -30, 1)), p) == float("inf")
     # Detrás, del lado -Y, también cuenta.
     assert tf.pasillo_qr(con((-20, -9, 1), (30, 30, 1), (30, -30, 1)), p) == 1.0
+
+
+def _arcada_que_invade_el_pasillo(alto_saliente=6.0):
+    """La arcada de arriba con un saliente en la pared palatina de un lado,
+    que entra en el pasillo de la pinza: en el marco de ToothFORM queda en
+    x -4..0 con |y| desde 10,2 (pasillo 2,2 < LimitX 2,5), de `alto_saliente`
+    de alto desde la base."""
+    import trimesh
+    from shapely.geometry import box
+
+    malla = _arcada_con_dientes()
+    malla.vertices[malla.vertices[:, 2] > 13.9, :2] *= 0.99
+    saliente = trimesh.creation.extrude_polygon(box(10.2, -3.0, 17.5, 1.0), alto_saliente, engine="manifold")
+    piezas = malla.split(only_watertight=False)
+    encia = max(piezas, key=lambda q: q.area)
+    encia = encia.union(saliente, engine="manifold")
+    return trimesh.util.concatenate([encia, *[q for q in piezas if q is not max(piezas, key=lambda q: q.area)]])
+
+
+def test_abre_el_pasillo_en_la_encia_cuando_no_llega_a_limitx(tmp_path):
+    """Con AbrirPasillo=1, si el pasillo no llega a LimitX le saca a la encía
+    una cuña desde la altura del QR, inclinada 2°, hasta LimitX + margen; los
+    dientes no se tocan, lo dice en el log y -gum.stl sale con la muesca."""
+    _con_librerias()
+    import numpy as np
+    import trimesh
+
+    from plugins.keep_form.enkukador import toothform as tf
+
+    malla = _arcada_que_invade_el_pasillo()
+    p = tf.Parametros()
+    v = malla.copy().apply_transform(tf.marco(malla, p)[0]).vertices
+    assert tf.pasillo_qr(trimesh.Trimesh(v, process=False), p) < p.LimitX  # el saliente invade
+
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-U05-A.stl").write_bytes(malla.export(file_type="stl"))
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale", AbrirPasillo="1")
+
+    assert r.status == "ok", r.message
+    assert r.outputs["exportados"] == ["AB123-U05-A"]
+    aviso = next(m for m in logs if "muesca" in m)
+    assert "lado -Y" in aviso or "lado +Y" in aviso
+    assert "queda 2.8" in aviso and "desde z=3.2" in aviso
+    assert any("pasillo QR 2.2" in m for m in logs)  # el del log sigue siendo el de antes
+    gum = trimesh.load(tmp_path / "sale" / "AB123" / "AB123-U05-A-gum.stl", force="mesh")
+    g = gum.vertices
+    w = (p.QrSize + 1) / 2
+    arriba = g[(g[:, 0] <= 10 - w) & (g[:, 2] > p.PasilloPiso + 0.01)]
+    assert np.abs(arriba[:, 1]).min() - w >= p.LimitX + p.PasilloMargen - 1e-3
+    abajo = g[(g[:, 0] <= 10 - w) & (g[:, 2] < p.PasilloPiso - 0.01) & (g[:, 2] >= 0)]
+    assert np.abs(abajo[:, 1]).min() - w < p.LimitX  # por debajo del piso queda como estaba
+    # La cara se abre hacia arriba (2°): en lo alto de la muesca (z = 5,5, el
+    # tope del saliente) hay 2,3 mm x tan 2° = 0,08 más de lugar que en el piso.
+    cara = g[(g[:, 0] <= 10 - w) & (g[:, 0] > -4.5) & (g[:, 2] >= p.PasilloPiso - 0.01) & (np.abs(g[:, 1]) < 11.0)]
+    piso, tope = cara[cara[:, 2] < p.PasilloPiso + 0.01], cara[cara[:, 2] > 5.4]
+    assert len(piso) and len(tope)
+    assert abs(np.abs(piso[:, 1]).max() - 10.8) < 0.01
+    assert abs(np.abs(tope[:, 1]).max() - 10.8 - 2.3 * np.tan(np.radians(2))) < 0.01
+
+
+def test_la_muesca_tiene_limites_y_si_no_se_puede_es_clip_limit(tmp_path):
+    """Si falta más que la tolerancia, si la cuña no sale de la pared antes de
+    PasilloAltoMax, o si queda cerca de un diente, no se abre: es 'Clip limit
+    exceeded' con el motivo. Y apagado (por defecto) sigue siendo sólo aviso."""
+    _con_librerias()
+    stl = _arcada_que_invade_el_pasillo().export(file_type="stl")
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-U05-A.stl").write_bytes(stl)
+
+    def corrida(**params):
+        logs = []
+        r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale", **params)
+        return r, logs
+
+    r, logs = corrida(AbrirPasillo="1", PasilloTolerancia="0.1")
+    assert r.status == "err" and r.outputs["modelos_fallidos"][0]["motivo"].startswith("Clip limit exceeded (")
+    assert "PasilloTolerancia" in r.outputs["modelos_fallidos"][0]["motivo"]
+    r, _ = corrida(AbrirPasillo="1", PasilloAltoMax="1")
+    assert r.status == "err" and "PasilloAltoMax" in r.outputs["modelos_fallidos"][0]["motivo"]
+    r, _ = corrida(AbrirPasillo="1", PasilloDiente="50")
+    assert r.status == "err" and "diente" in r.outputs["modelos_fallidos"][0]["motivo"]
+    r, logs = corrida()
+    assert r.status == "ok" and not any("muesca" in m for m in logs) and any("sólo aviso" in m for m in logs)
