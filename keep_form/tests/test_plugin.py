@@ -545,3 +545,35 @@ def test_leer_pts_como_toothform():
     p = tf.leer_pts("1 2 3\r\n4\t5\t6\t7\n  8   9   10 \nsolo dos 1\n1.5e1 x 2\n")
     # "solo dos 1" tiene 3 campos: atof de lo que no es número da 0, como en ToothFORM
     assert p.tolist() == [[1, 2, 3], [4, 5, 6], [8, 9, 10], [0.0, 0.0, 1.0], [15.0, 0.0, 2.0]]
+
+
+def test_type3_con_abrir_pasillo_no_se_rompe_ni_abre_la_muesca(tmp_path):
+    """BY179 (0.3.0): Type3 con AbrirPasillo=1 daba "Failed to preprocess
+    (TypeError: 'float' object is not iterable)" en los 42 modelos, por un
+    min() sin dientes. Ahora exporta, no abre la muesca (sin dientes separados
+    no se puede comprobar que no toque uno) y, si el pasillo no da, avisa."""
+    _con_librerias()
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-U05-A.stl").write_bytes(_solido_unico().export(file_type="stl"))
+    (tmp_path / "caso" / "AB123-U05-A.pts").write_text("1 2 3\n")
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale", tipo="Type3",
+                  AbrirPasillo="1", LimitX="10")
+    assert r.status == "ok", r.message
+    assert r.outputs["exportados"] == ["AB123-U05-A"]
+    assert not any("muesca en la encía" in m for m in logs)
+    assert any("AbrirPasillo no aplica en Type3" in m for m in logs)
+
+
+def test_abrir_pasillo_sin_dientes_en_type1():
+    """El mismo min() de arriba, directo: una malla de una sola pieza."""
+    _con_librerias()
+    from plugins.keep_form.enkukador import toothform as tf
+
+    malla = _solido_unico()
+    p = tf.Parametros(AbrirPasillo=1.0)
+    M, _ = tf.marco(malla, p)
+    m = malla.copy()
+    m.apply_transform(M)
+    nueva, muesca = tf.abrir_pasillo(m, p)  # no explota; y con pasillo de sobra no hay muesca
+    assert muesca is None and nueva is m

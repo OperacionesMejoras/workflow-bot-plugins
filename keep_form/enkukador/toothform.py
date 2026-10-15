@@ -599,8 +599,10 @@ def abrir_pasillo(m: trimesh.Trimesh, p: Parametros) -> tuple[trimesh.Trimesh, M
     # El pasillo de antes se mide como en generar (encía cortada en z=0, con
     # los vértices nuevos del corte): es el número que se compara con ToothFORM.
     em = _cerrada(encia)
-    antes = min(pasillo_qr(_tm(em.trim_by_plane((0, 0, 1), 0.0)), p),
-                *(pasillo_qr(d, p) for d in dientes))
+    # Lista y no *args: sin dientes, min() con un solo número es TypeError
+    # (BY179 Type3 con AbrirPasillo=1, 0.3.0: 42 de 42 "Failed to preprocess").
+    antes = min([pasillo_qr(_tm(em.trim_by_plane((0, 0, 1), 0.0)), p),
+                 *(pasillo_qr(d, p) for d in dientes)])
     if antes >= p.LimitX:
         return m, None
     if p.LimitX - antes > p.PasilloTolerancia:
@@ -756,7 +758,9 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
         M, curva = marco(malla, p)
         m = malla.copy()
         m.apply_transform(M)
-        if p.AbrirPasillo:
+        # En Type3 no hay dientes separados: no se puede comprobar que la muesca
+        # no toque un diente, así que no se abre y el pasillo queda como aviso.
+        if p.AbrirPasillo and tipo != "Type3":
             m, muesca = abrir_pasillo(m, p)
         if tipo == "Type3":
             encia, dientes = encia_sola(m), trimesh.Trimesh()
@@ -807,6 +811,8 @@ def generar(malla: trimesh.Trimesh, caso: str, modelo: str,
             + ("al límite, ToothFORM puede aceptarlo o rechazarlo" if p.LimitX - res.holgura_qr < AL_LIMITE
                else "ToothFORM daría 'Clip limit exceeded'")
             + " (sólo aviso hasta confirmarlo con el proveedor)"
+            + ("; AbrirPasillo no aplica en Type3: sin dientes separados no se puede comprobar que la "
+               "muesca no toque un diente" if p.AbrirPasillo and tipo == "Type3" else "")
         )
     elif res.holgura_qr - p.LimitX < AL_LIMITE:
         res.avisos.append(

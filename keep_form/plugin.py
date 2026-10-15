@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.3.0",
+    version="0.3.1",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -88,7 +88,7 @@ EXPORTAR = ToolManifest(
         "Con AbrirPasillo=1, si el pasillo de la pinza hacia el QR no llega a LimitX, abre una "
         "muesca en la encía (sin tocar dientes) en vez de avisar, y da 'Clip limit exceeded' "
         "sólo si ni así se puede (PasilloMargen, PasilloGrados, PasilloPiso, PasilloTolerancia, "
-        "PasilloAltoMax, PasilloDiente). "
+        "PasilloAltoMax, PasilloDiente). En Type3 no abre la muesca (no hay dientes separados). "
         "Es la parte de ToothFORM de Enkukador (OperacionesMejoras/Enkukador-keepsmiling); "
         "algunas medidas están marcadas ahí como provisorias."
     ),
