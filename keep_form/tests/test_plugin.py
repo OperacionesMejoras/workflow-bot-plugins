@@ -516,6 +516,8 @@ def test_type3_un_solo_shell_mas_pts(tmp_path):
     salida = tmp_path / "sale" / "AB123"
     assert (salida / "AB123-U05-A.stl").exists() and (salida / "AB123-U05-A-gum.stl").exists()
     assert not (salida / "AB123-U05-A-tooth.ply").exists()
+    # El -MatA.txt del robot sale igual que en Type1 (las dos identidades de ToothFORM).
+    assert (salida / "AB123-U05-A-MatA.txt").read_bytes() == ("1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\r\n" * 2).encode()
     gum = trimesh.load(salida / "AB123-U05-A-gum.stl", force="mesh")
     assert gum.bounds[1][2] > 12  # el shell entero, con los "dientes", cortado en z=0
     assert gum.bounds[0][2] > -1e-6 and gum.bounds[1][0] < 59  # sin la basura
