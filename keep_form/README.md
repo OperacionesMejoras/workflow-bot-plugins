@@ -69,7 +69,9 @@ alta que un corte vertical, pero más fina arriba.
 Parámetros (params extra del tool, como los de ParameterSettings):
 `AbrirPasillo` 0/1 (apagado por defecto hasta validar), `PasilloMargen` 0,3,
 `PasilloGrados` 2, `PasilloPiso` 3,2, `PasilloTolerancia` 1,0,
-`PasilloAltoMax` 8, `PasilloDiente` 2. En el log, el "pasillo QR" de cada
+`PasilloAltoMax` 8, `PasilloDiente` 2. En Type3 (sin dientes separados) la
+muesca no se abre salvo `PasilloEnType3` 1: lo decide el workflow, y entonces
+no se comprueba la distancia a los dientes. En el log, el "pasillo QR" de cada
 modelo sigue siendo el de antes de la muesca (el que se compara con
 ToothFORM); el aviso dice de qué lado, cuánto de profundo y de alto, cuánto
 sacó y cuánto queda desde el piso. La cuña pasa el margen más allá de x = 2

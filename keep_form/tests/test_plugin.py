@@ -562,7 +562,13 @@ def test_type3_con_abrir_pasillo_no_se_rompe_ni_abre_la_muesca(tmp_path):
     assert r.status == "ok", r.message
     assert r.outputs["exportados"] == ["AB123-U05-A"]
     assert not any("muesca en la encía" in m for m in logs)
-    assert any("AbrirPasillo no aplica en Type3" in m for m in logs)
+    assert any("no se abre en Type3 sin PasilloEnType3" in m for m in logs)
+    # Con PasilloEnType3=1 el workflow decide: se abre, sin el control de dientes.
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale2", tipo="Type3",
+                  AbrirPasillo="1", LimitX="10", PasilloEnType3="1", PasilloTolerancia="20", PasilloAltoMax="20")
+    assert r.status == "ok", r.message
+    assert any("muesca en la encía" in m and "no se comprobó la distancia a los dientes" in m for m in logs)
 
 
 def test_abrir_pasillo_sin_dientes_en_type1():
