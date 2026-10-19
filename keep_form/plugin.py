@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.4.0",
+    version="0.4.1",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -177,6 +177,30 @@ def _una_pieza(ctx: ToolContext, stem: str, pieza):
     return partes[0]
 
 
+def _cerrada(ctx: ToolContext, stem: str, pieza):
+    """
+    La pieza totalmente cerrada, como la va a leer el nesting o el slicer: si no lo está, se le
+    pasa la cura de 'sanar mallas'. Las booleanas del vaciado a veces dejan un triángulo de
+    10 um de lado (área 0 para un test de cierre estricto; BZ056-L00-B Type3, 0.3.2) y los
+    procesos siguientes rechazaban la pieza. Si ni así cierra, sale igual (como ToothFORM, que
+    exporta piezas abiertas) pero lo avisa, y 'sanar mallas' después da el error.
+    """
+    from . import mallas
+
+    antes = mallas.medir(pieza)
+    if antes["cerrada"]:
+        return pieza
+    curada, _, despues, hecho = mallas.sanar(pieza)
+    ds = 100 * abs(despues["superficie"] - antes["superficie"]) / max(antes["superficie"], 1e-9)
+    if despues["cerrada"] and ds <= mallas.SUPERFICIE_MAX_PCT:
+        ctx.log(f"{stem}: la pieza no estaba totalmente cerrada ({'; '.join(mallas.problemas(antes))}): "
+                f"sanada ({'; '.join(hecho)})", "warning")
+        return curada
+    ctx.log(f"{stem}: la pieza NO queda totalmente cerrada ({'; '.join(mallas.problemas(antes))}) y la cura no "
+            "alcanza: sale igual; revisarla con 'analizar mallas'", "warning")
+    return pieza
+
+
 def _exportar(ctx: ToolContext) -> ToolResult:
     try:
         return _exportar_en_disco(ctx)
@@ -281,7 +305,7 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
             resultado = tf.generar(malla, caso, modelo or stem, p, tipo)
             estado, holgura = resultado.estado, resultado.holgura_qr
             if estado in tf.EXPORTADOS:
-                resultado.pieza = _una_pieza(ctx, stem, resultado.pieza)
+                resultado.pieza = _cerrada(ctx, stem, _una_pieza(ctx, stem, resultado.pieza))
             destino = fs.join(salida, caso)
             fs.make_dirs(destino)
             for archivo, datos in tf.exportar(resultado, stem).items():

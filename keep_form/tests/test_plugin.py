@@ -753,3 +753,28 @@ def test_la_cura_triangula_agujeros_no_convexos_sin_earcut():
     areas = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
     assert (areas > 0).all() and abs(areas.sum() / 2 - 7.0) < 1e-9  # área de la L, sin solapes
     assert salud._orejas(uv[::-1]).shape == (4, 3)
+
+
+def test_exportar_entrega_la_pieza_totalmente_cerrada(tmp_path, arcada_stl, monkeypatch):
+    """Si la pieza que arma exportar no está totalmente cerrada (acá, con caras duplicadas,
+    como las que a veces deja una booleana), se la cura antes de escribirla y se avisa."""
+    _con_librerias()
+    import numpy as np
+    import trimesh
+
+    from plugins.keep_form.enkukador import toothform as tf
+
+    pieza_original = tf.pieza
+
+    def con_duplicadas(*a, **k):
+        p, hueca = pieza_original(*a, **k)
+        return trimesh.Trimesh(p.vertices, np.vstack([p.faces, p.faces[:5]]), process=False), hueca
+
+    monkeypatch.setattr(tf, "pieza", con_duplicadas)
+    (tmp_path / "caso").mkdir()
+    (tmp_path / "caso" / "AB123-L05-A.stl").write_bytes(arcada_stl)
+    logs = []
+    r = _exportar(LocalFsAdapter(root=tmp_path), logs=logs, carpeta="caso", salida="sale")
+    assert r.status == "ok", r.message
+    assert any("no estaba totalmente cerrada" in m and "sanada" in m for m in logs)
+    assert _medir_archivo(tmp_path / "sale" / "AB123" / "AB123-L05-A.stl")["cerrada"]

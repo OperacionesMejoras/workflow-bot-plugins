@@ -127,3 +127,8 @@ degenerada) y BZ254-U06-A rota a propósito (agujeros, duplicadas, una degenerad
 suelto, la mitad de las caras al revés) quedan totalmente cerradas con el volumen igual a menos
 de 0,001 %. Las piezas de keep-form de BZ056 traían 1 o 2 caras de área 0 de las booleanas: la
 cura las quita. Unos 5 s por pieza de 200.000 caras.
+
+Desde 0.4.1, `exportar` mide cada pieza antes de escribirla y, si no está totalmente cerrada, le
+pasa la misma cura y lo avisa en el log. En BZ056-L00-B Type3 el vaciado dejaba un triángulo de
+10 um de lado (área 0 para un test estricto): ahora sale cerrada. Si la cura no alcanza, la
+pieza sale igual con el aviso, y `sanar mallas` después da el error.
