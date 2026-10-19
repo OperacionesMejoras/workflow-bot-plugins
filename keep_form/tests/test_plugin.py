@@ -778,3 +778,25 @@ def test_exportar_entrega_la_pieza_totalmente_cerrada(tmp_path, arcada_stl, monk
     assert r.status == "ok", r.message
     assert any("no estaba totalmente cerrada" in m and "sanada" in m for m in logs)
     assert _medir_archivo(tmp_path / "sale" / "AB123" / "AB123-L05-A.stl")["cerrada"]
+
+
+def test_sanar_otros_formatos_y_un_archivo_roto_no_frena_el_lote(tmp_path):
+    """PLY, OBJ y OFF se curan y se guardan en su mismo formato; un archivo ilegible queda
+    como fallida con su motivo y el resto del lote sigue."""
+    _con_librerias()
+    import trimesh
+
+    d = tmp_path / "lote"
+    d.mkdir()
+    for ext in ("ply", "obj", "off"):
+        _esfera_rota().export(d / f"pieza.{ext}")
+    (d / "rota.stl").write_bytes(b"esto no es un stl")
+    r = _exportar_tool(LocalFsAdapter(root=tmp_path), "keep_form.sanar", None, carpeta="lote")
+
+    assert r.status == "err" and r.error_kind == "malla_abierta"
+    assert [x["archivo"].split("/")[-1] for x in r.outputs["fallidas"]] == ["rota.stl"]
+    assert len(r.outputs["sanadas"]) == 3
+    for ext in ("ply", "obj", "off"):
+        m = trimesh.load(d / f"pieza.{ext}", force="mesh")
+        from plugins.keep_form import mallas
+        assert mallas.medir(m)["cerrada"], ext

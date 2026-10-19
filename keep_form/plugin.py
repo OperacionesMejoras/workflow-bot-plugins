@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.4.1",
+    version="0.4.2",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -575,7 +575,9 @@ def _sanar(ctx: ToolContext) -> ToolResult:
                                      "un agujero que no es de escaneo o una parte quitada): no se guardó")
                 else:
                     fs.make_dirs(fs.parent(destino))
-                    fs.write_bytes(destino, curada.export(file_type=ext))
+                    datos = curada.export(file_type=ext)
+                    # OBJ y OFF salen de trimesh como texto; el port escribe bytes
+                    fs.write_bytes(destino, datos.encode("utf-8") if isinstance(datos, str) else datos)
                     resultado = dict(fila, accion="sanada", superficie_cambio_pct=round(ds, 4))
             except PortError:
                 raise
