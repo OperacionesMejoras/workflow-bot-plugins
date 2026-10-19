@@ -94,3 +94,36 @@ binario (`Toothform.exe` 0x418d50 y 0x41d8c1–0x41de77; ver `enkukador/toothfor
 - `-mark.txt` (ImportExtPos=1) no está: la instalación lo tiene en 0.
 
 Falta validarlo con un caso real (STL, `.pts` y la salida de ToothFORM).
+
+## Analizar y sanar mallas (0.4.0)
+
+Dos tools para después de `exportar` (o de cualquier paso que deje STL), porque el nesting y
+el slicer fallan con una malla que no está totalmente cerrada. Los dos aceptan `archivo` (una),
+`archivos` (una lista) o `carpeta` (todas, con `subcarpetas` por defecto); en una carpeta dejan
+afuera `-gum.stl`, `-tooth.ply` y `-att.stl` salvo `todas=1`, porque el `-gum.stl` de Type1 es
+abierto a propósito.
+
+- **`analizar mallas`** mide cada malla como la lee el proceso siguiente (STL con los vértices
+  unidos por posición) y no cambia nada. Totalmente cerrada es: ninguna arista de borde, ninguna
+  arista con más de dos caras, ningún vértice non-manifold, ninguna cara de área 0, orientación
+  consistente y volumen positivo. Salidas: `mallas` (el detalle de cada una), `abiertas_lista`,
+  `todas_cerradas` ("si"/"no").
+- **`sanar mallas`** cura las que no lo están, con la cura de model-arranger
+  (`salud.curar`, copiada en `salud.py`): vértices casi coincidentes unidos, caras degeneradas y
+  duplicadas afuera, fragmentos sueltos afuera, orientación corregida, agujeros tapados, y
+  aristas de 4 caras separadas 2 um. keep-form agrega la separación de los vértices
+  non-manifold (dos partes que se tocan en un punto), también 2 um (`mallas.py`). Después la
+  relee y, si no quedó totalmente cerrada o la superficie cambió más de 1 % (un agujero que no
+  es de escaneo, como un casquete de 16 mm), la deja como estaba y el tool da error
+  `malla_abierta` con el motivo de cada una. Las que ya estaban cerradas no se tocan.
+  `salida` vacía reemplaza el original; si no, deja las curadas ahí con las mismas subcarpetas.
+
+La copia de `salud.py` es la de model-arranger (commit 17bcb9b) con un solo cambio: los
+agujeros se triangulan por recorte de orejas propio en vez de mapbox_earcut, que keep-form no
+tiene entre sus librerías curadas.
+
+Medido: la pieza de ToothFORM de BZ056-L00-B (34 aristas y 68 vértices non-manifold, 1 cara
+degenerada) y BZ254-U06-A rota a propósito (agujeros, duplicadas, una degenerada, un fragmento
+suelto, la mitad de las caras al revés) quedan totalmente cerradas con el volumen igual a menos
+de 0,001 %. Las piezas de keep-form de BZ056 traían 1 o 2 caras de área 0 de las booleanas: la
+cura las quita. Unos 5 s por pieza de 200.000 caras.

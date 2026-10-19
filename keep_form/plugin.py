@@ -43,7 +43,7 @@ from backend.core.ports import PortError
 MANIFEST = PluginManifest(
     name="keep-form",
     label="Keep Form",
-    version="0.3.2",
+    version="0.4.0",
     doc="Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot.",
     ports=(port_names.FS,),
     # Las mismas de requirements.txt (que es lo que se instala, con hash), para
@@ -353,8 +353,255 @@ def _exportar_en_disco(ctx: ToolContext) -> ToolResult:
     return ToolResult.ok(**salidas)
 
 
+# ------------------------------------------------------------------ análisis y cura de mallas
+#
+# Para después de exportar (o de cualquier otro paso que deje STL): los procesos que siguen
+# (nesting, slicer) fallan con una malla que no está totalmente cerrada. La cura es la de
+# model-arranger (ver mallas.py y salud.py). Un archivo, una lista o una carpeta entera.
+
+# Lo que keep-form o ToothFORM dejan al lado de la pieza y no se imprime: -gum.stl es abierta a
+# propósito en Type1 (abierta donde apoyan los dientes), y -tooth.ply / -att.stl son referencias.
+_NO_PIEZAS = ("-gum.stl", "-tooth.ply", "-att.stl")
+
+_PARAMS_MALLAS = (
+    Param("archivo", ParamType.PATH, default="", doc="Una sola malla. Alternativa a 'archivos' y 'carpeta'."),
+    Param("archivos", ParamType.JSON, default=[], doc="Una lista de mallas (ej. {rutas} de 'buscar')."),
+    Param("carpeta", ParamType.PATH, default="", doc="Todas las mallas de la carpeta (ej. {carpeta_export} de 'exportar')."),
+    Param("subcarpetas", ParamType.BOOL, default=True, doc="Con 'carpeta': también las de adentro (<salida>\\<ID>\\)."),
+    Param(
+        "todas", ParamType.BOOL, default=False,
+        doc="Con 'carpeta': también -gum.stl, -tooth.ply y -att.stl. Por defecto sólo las piezas: "
+        "el -gum.stl de Type1 es abierto a propósito.",
+    ),
+)
+_OUT_MALLAS = (
+    Output("mallas", ParamType.JSON, doc="[{archivo, cerrada, problemas, borde, multiples, vertices_no_variedad, degeneradas, winding, cuerpos, triangulos, volumen, ...}]"),
+    Output("cerradas", ParamType.INT),
+    Output("abiertas", ParamType.INT),
+    Output("abiertas_lista", ParamType.JSON, doc="Las rutas de las que no están totalmente cerradas."),
+    Output("todas_cerradas", ParamType.STR, doc="'si' o 'no'."),
+)
+
+ANALIZAR = ToolManifest(
+    id="keep_form.analizar",
+    label="analizar mallas",
+    category="KEEP FORM",
+    doc=(
+        "Mide si cada malla está totalmente cerrada, como la va a leer el proceso siguiente (STL "
+        "con los vértices unidos por posición): agujeros, aristas y vértices non-manifold, caras "
+        "de área 0, orientación. No cambia nada. Para curar, 'sanar mallas'."
+    ),
+    params=_PARAMS_MALLAS,
+    outputs=_OUT_MALLAS,
+)
+
+SANAR = ToolManifest(
+    id="keep_form.sanar",
+    label="sanar mallas",
+    category="KEEP FORM",
+    doc=(
+        "Cura las mallas que no están totalmente cerradas (la cura de mallas de model-arranger): "
+        "une vértices casi coincidentes, quita caras degeneradas, duplicadas y fragmentos sueltos, "
+        "corrige la orientación, tapa agujeros y separa 2 um las aristas y vértices non-manifold. "
+        "Después la relee como el proceso siguiente y, si no quedó totalmente cerrada o la "
+        "superficie cambió más de 1 % (un agujero que no es de escaneo), la deja como estaba y da error. Las que ya están cerradas no se tocan."
+    ),
+    params=(
+        *_PARAMS_MALLAS,
+        Param(
+            "salida", ParamType.PATH, default="",
+            doc="Dónde dejar las curadas (con la misma estructura de subcarpetas que 'carpeta'). "
+            "Vacío: reemplaza el archivo original.",
+        ),
+        Param("paralelo", ParamType.INT, default=1, doc="Cuántas a la vez (hasta 8)."),
+    ),
+    outputs=(
+        *_OUT_MALLAS,
+        Output("sanadas", ParamType.JSON, doc="Las que se curaron y quedaron cerradas."),
+        Output("ya_cerradas", ParamType.JSON, doc="Las que ya estaban cerradas (no se tocaron)."),
+        Output("fallidas", ParamType.JSON, doc="[{archivo, motivo}] de las que no se pudieron cerrar."),
+    ),
+)
+
+
+def _rutas_mallas(ctx: ToolContext, fs) -> tuple[list[tuple[str, str]], ToolResult | None]:
+    """[(ruta, ruta relativa a 'carpeta' o el nombre)] según archivo / archivos / carpeta."""
+    archivo, archivos, carpeta = ctx.params.get("archivo") or "", ctx.params.get("archivos") or [], ctx.params.get("carpeta") or ""
+    if sum(map(bool, (archivo, archivos, carpeta))) != 1:
+        return [], ToolResult.err("hace falta uno de 'archivo', 'archivos' o 'carpeta' (sólo uno)")
+    if not carpeta:
+        lista = [archivo] if archivo else list(archivos)
+        faltan = [a for a in lista if not fs.exists(a) or fs.is_dir(a)]
+        if faltan:
+            return [], ToolResult.err(f"no existen estos archivos: {', '.join(faltan)}")
+        return [(a, fs.basename(a)) for a in lista], None
+    if not fs.exists(carpeta) or not fs.is_dir(carpeta):
+        return [], ToolResult.err(f"no existe la carpeta: {carpeta}")
+    entradas = fs.walk(carpeta) if ctx.params.get("subcarpetas", True) else fs.list_dir(carpeta)
+    todas = bool(ctx.params.get("todas"))
+    rutas = []
+    for e in entradas:
+        nombre = e.name.lower()
+        if e.is_dir or not nombre.endswith(_EXT_MODELOS):
+            continue
+        if not todas and nombre.endswith(_NO_PIEZAS):
+            continue
+        rutas.append((e.path, e.path[len(carpeta):].lstrip("\\/") or e.name))
+    if not rutas:
+        return [], ToolResult.err(f"no hay ninguna malla (.stl, .obj, .ply, .off) en {carpeta}")
+    return sorted(rutas, key=lambda r: r[1].lower()), None
+
+
+def _cargar_malla(fs, ruta: str):
+    import trimesh
+
+    ext = ruta.rpartition(".")[2].lower()
+    m = trimesh.load(io.BytesIO(fs.read_bytes(ruta)), file_type=ext, force="mesh")
+    if not isinstance(m, trimesh.Trimesh) or not len(m.faces):
+        raise ValueError("no es una malla o está vacía")
+    return m, ext
+
+
+def _fila(ruta: str, e: dict) -> dict:
+    from . import mallas
+
+    return {"archivo": ruta, "cerrada": e["cerrada"], "problemas": mallas.problemas(e),
+            **{k: e[k] for k in ("borde", "multiples", "vertices_no_variedad", "degeneradas", "winding",
+                                 "cuerpos", "triangulos", "volumen", "superficie")}}
+
+
+def _mallas_previas(ctx: ToolContext):
+    """(fs, rutas, mallas) o (None, None, ToolResult de error)."""
+    fs = ctx.port(port_names.FS)
+    rutas, error = _rutas_mallas(ctx, fs)
+    if error:
+        return None, None, error
+    try:
+        from . import mallas
+    except ImportError as exc:
+        return None, None, ToolResult.err(
+            f"falta la librería '{exc.name}': se instala con el requirements.txt de keep-form (reinstalar el plugin)",
+            error_kind="librerias",
+        )
+    if (sin_rtree := _rtree_listo(ctx)) is not None:
+        return None, None, sin_rtree
+    return fs, rutas, mallas
+
+
+def _salidas_mallas(filas: list[dict]) -> dict:
+    abiertas = [f["archivo"] for f in filas if not f["cerrada"]]
+    return dict(mallas=filas, cerradas=len(filas) - len(abiertas), abiertas=len(abiertas),
+                abiertas_lista=abiertas, todas_cerradas="no" if abiertas else "si")
+
+
+def _analizar(ctx: ToolContext) -> ToolResult:
+    try:
+        fs, rutas, mallas = _mallas_previas(ctx)
+        if fs is None:
+            return mallas
+        filas = []
+        for i, (ruta, _) in enumerate(rutas, 1):
+            if ctx.cancelled:
+                return ToolResult.err(f"cancelado después de {i - 1} de {len(rutas)} mallas")
+            try:
+                m, _ = _cargar_malla(fs, ruta)
+                fila = _fila(ruta, mallas.medir(m))
+            except PortError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - una malla ilegible es una malla abierta
+                fila = {"archivo": ruta, "cerrada": False, "problemas": [f"no se pudo leer: {type(exc).__name__}: {exc}"]}
+            ctx.log(f"{i}/{len(rutas)} {fs.basename(ruta)}: " + ("cerrada" if fila["cerrada"] else "ABIERTA: " + "; ".join(fila["problemas"])),
+                    "info" if fila["cerrada"] else "warning")
+            filas.append(fila)
+        salidas = _salidas_mallas(filas)
+        return ToolResult.ok(f"{salidas['cerradas']} de {len(filas)} mallas totalmente cerradas", **salidas)
+    except PortError as exc:
+        return ToolResult.err(f"ruta o permiso: {exc}", error_kind="ruta")
+
+
+def _sanar(ctx: ToolContext) -> ToolResult:
+    try:
+        fs, rutas, mallas = _mallas_previas(ctx)
+        if fs is None:
+            return mallas
+        salida = ctx.params.get("salida") or ""
+        paralelo = max(1, min(int(ctx.params.get("paralelo") or 1), 8))
+        candado, hechos = threading.Lock(), [0]
+
+        def una(par):
+            ruta, relativa = par
+            destino = fs.join(salida, relativa) if salida else ruta
+            resultado = {"archivo": ruta}
+            try:
+                m, ext = _cargar_malla(fs, ruta)
+                curada, antes, despues, hecho = mallas.sanar(m)
+                fila = _fila(ruta, despues)
+                fila.update(antes=mallas.problemas(antes), reparaciones=hecho, destino=destino)
+                ds = 100 * abs(despues["superficie"] - antes["superficie"]) / max(antes["superficie"], 1e-9)
+                if antes["cerrada"]:
+                    resultado = dict(fila, accion="ya_cerrada")
+                    if salida:
+                        fs.make_dirs(fs.parent(destino))
+                        fs.write_bytes(destino, fs.read_bytes(ruta))
+                elif not despues["cerrada"]:
+                    resultado = dict(fila, accion="fallida", motivo="sigue abierta tras la cura: " + "; ".join(mallas.problemas(despues)))
+                elif ds > mallas.SUPERFICIE_MAX_PCT:
+                    resultado = dict(fila, cerrada=False, accion="fallida",
+                                     motivo=f"la cura cambió la superficie {ds:.1f} % (más de {mallas.SUPERFICIE_MAX_PCT} %: "
+                                     "un agujero que no es de escaneo o una parte quitada): no se guardó")
+                else:
+                    fs.make_dirs(fs.parent(destino))
+                    fs.write_bytes(destino, curada.export(file_type=ext))
+                    resultado = dict(fila, accion="sanada", superficie_cambio_pct=round(ds, 4))
+            except PortError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - una malla rota no frena el lote
+                resultado = {"archivo": ruta, "cerrada": False, "accion": "fallida", "problemas": [],
+                             "motivo": f"{type(exc).__name__}: {exc}"}
+            with candado:
+                hechos[0] += 1
+                n = f"{hechos[0]}/{len(rutas)} {fs.basename(ruta)}"
+                if resultado["accion"] == "ya_cerrada":
+                    ctx.log(f"{n}: ya estaba cerrada")
+                elif resultado["accion"] == "sanada":
+                    ctx.log(f"{n}: sanada ({'; '.join(resultado['antes'])}) -> cerrada; " + "; ".join(resultado["reparaciones"]))
+                else:
+                    ctx.log(f"{n}: NO SE PUDO CERRAR: {resultado['motivo']}", "error")
+            return resultado
+
+        if paralelo > 1:
+            with concurrent.futures.ThreadPoolExecutor(paralelo) as ejecutor:
+                filas = list(ejecutor.map(una, rutas))
+        else:
+            filas = []
+            for par in rutas:
+                if ctx.cancelled:
+                    return ToolResult.err(f"cancelado después de {len(filas)} de {len(rutas)} mallas")
+                filas.append(una(par))
+        salidas = _salidas_mallas(filas)
+        salidas.update(
+            sanadas=[f["archivo"] for f in filas if f["accion"] == "sanada"],
+            ya_cerradas=[f["archivo"] for f in filas if f["accion"] == "ya_cerrada"],
+            fallidas=[{"archivo": f["archivo"], "motivo": f["motivo"]} for f in filas if f["accion"] == "fallida"],
+        )
+        resumen = (f"{len(salidas['sanadas'])} sanada(s), {len(salidas['ya_cerradas'])} ya cerrada(s), "
+                   f"{len(salidas['fallidas'])} sin poder cerrar, de {len(filas)}")
+        if salidas["fallidas"]:
+            return ToolResult.err(
+                f"{resumen}: " + "; ".join(f"{fs.basename(x['archivo'])}: {x['motivo']}" for x in salidas["fallidas"][:5]),
+                error_kind="malla_abierta", **salidas,
+            )
+        return ToolResult.ok(resumen, **salidas)
+    except PortError as exc:
+        return ToolResult.err(f"ruta o permiso: {exc}", error_kind="ruta")
+
+
 def build_plugin() -> Plugin:
-    return Plugin(manifest=MANIFEST, tools=[FunctionTool(manifest=EXPORTAR, fn=_exportar)])
+    return Plugin(manifest=MANIFEST, tools=[
+        FunctionTool(manifest=EXPORTAR, fn=_exportar),
+        FunctionTool(manifest=ANALIZAR, fn=_analizar),
+        FunctionTool(manifest=SANAR, fn=_sanar),
+    ])
 
 
 PLUGIN = build_plugin()

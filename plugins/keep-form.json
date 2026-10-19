@@ -1,6 +1,6 @@
 {
   "name": "keep-form",
-  "description": "Exportar como ToothFORM sin ToothFORM: pieza hueca con referencias del robot, QR y texto, -gum.stl, -tooth.ply y el log, armados adentro del Bot (geometría de Enkukador).",
+  "description": "Exportar como ToothFORM sin ToothFORM (pieza hueca, QR, -gum.stl, -pts.pts, log; Type1 y Type3) y analizar/sanar mallas para que queden totalmente cerradas, una o por lotes.",
   "source": "workflow-bot-plugin-keep-form",
   "path": "keep_form",
   "ports": [

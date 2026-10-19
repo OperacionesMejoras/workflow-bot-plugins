@@ -48,6 +48,22 @@ def _exportar(fs, logs=None, **params):
     return reg.execute("keep_form.exportar", factory)
 
 
+def _exportar_tool(fs, tool_id, logs=None, **params):
+    """Como _exportar, para cualquier tool de keep-form."""
+    reg = ToolRegistry(adapters={"fs": fs})
+    reg._add_plugin("keep-form", "plugins.keep_form:PLUGIN", build_plugin())
+
+    def factory(declaracion, ports=None):
+        declarados, extras = declaracion.split_params(params, {})
+        return ToolContext(
+            run_id="run-test", case_id="AB123", params=declarados, extras=extras,
+            config={}, context={}, ports=ports or {},
+            log=(lambda m, *_a, **_k: logs.append(m)) if logs is not None else (lambda *_a, **_k: None),
+        )
+
+    return reg.execute(tool_id, factory)
+
+
 def _arcada_con_dientes():
     """Una U extruida con la base en z=0 y ocho "dientes" sobre la cresta, como
     la que usa Enkukador en sus tests (sin pasar por su alineado)."""
@@ -583,3 +599,157 @@ def test_abrir_pasillo_sin_dientes_en_type1():
     m.apply_transform(M)
     nueva, muesca = tf.abrir_pasillo(m, p)  # no explota; y con pasillo de sobra no hay muesca
     assert muesca is None and nueva is m
+
+
+# ------------------------------------------------------------------ analizar / sanar mallas
+
+
+def _esfera_rota(semilla=1):
+    """Una esfera con agujeros chicos, caras duplicadas, una degenerada y la mitad de las
+    caras dadas vuelta: lo que la cura tiene que cerrar."""
+    import numpy as np
+    import trimesh
+
+    m = trimesh.creation.icosphere(subdivisions=4, radius=10)
+    rng = np.random.default_rng(semilla)
+    f = m.faces.copy()
+    keep = np.ones(len(f), bool)
+    keep[rng.choice(len(f), 3, replace=False)] = False  # tres agujeros de una cara
+    f = f[keep]
+    f = np.vstack([f, f[:2], [[f[5, 0], f[5, 0], f[5, 1]]]])
+    vuelta = rng.random(len(f)) < 0.5
+    f[vuelta] = f[vuelta][:, ::-1]
+    return trimesh.Trimesh(m.vertices, f, process=False)
+
+
+def _cubos(como):
+    """Dos cubos que se tocan por una arista ('arista') o por un vértice ('vertice'): una
+    pieza cerrada pero non-manifold, como las cajitas del texto que se tocan en la esquina."""
+    import trimesh
+
+    a = trimesh.creation.box((10, 10, 10))
+    b = trimesh.creation.box((10, 10, 10))
+    b.apply_translation((10, 10, 0) if como == "arista" else (10, 10, 10))
+    return trimesh.util.concatenate([a, b])
+
+
+def _medir_archivo(ruta):
+    import trimesh
+
+    from plugins.keep_form import mallas
+
+    return mallas.medir(trimesh.load_mesh(ruta))
+
+
+def test_analizar_mallas_por_carpeta_sin_tocar_nada(tmp_path):
+    """Mide todas las piezas de la carpeta y sus subcarpetas, dice cuáles están abiertas y
+    por qué, no cambia ningún archivo, y deja afuera el -gum.stl (abierto a propósito)."""
+    _con_librerias()
+    import trimesh
+
+    (tmp_path / "sale" / "AB123").mkdir(parents=True)
+    trimesh.creation.icosphere(subdivisions=3, radius=8).export(tmp_path / "sale" / "AB123" / "AB123-L00-A.stl")
+    _esfera_rota().export(tmp_path / "sale" / "AB123" / "AB123-L01-A.stl")
+    _cubos("arista").export(tmp_path / "sale" / "AB123" / "AB123-L02-A.stl")
+    abierta = trimesh.creation.icosphere(subdivisions=3, radius=8)
+    abierta.update_faces(abierta.face_normals[:, 2] < 0.5)
+    abierta.export(tmp_path / "sale" / "AB123" / "AB123-L00-A-gum.stl")
+    antes = {p.name: p.read_bytes() for p in (tmp_path / "sale" / "AB123").iterdir()}
+    logs = []
+    reg_fs = LocalFsAdapter(root=tmp_path)
+    r = _exportar_tool(reg_fs, "keep_form.analizar", logs, carpeta="sale")
+
+    assert r.status == "ok", r.message
+    assert r.outputs["cerradas"] == 1 and r.outputs["abiertas"] == 2 and r.outputs["todas_cerradas"] == "no"
+    por_nombre = {m["archivo"].replace("\\", "/").split("/")[-1]: m for m in r.outputs["mallas"]}
+    assert set(por_nombre) == {"AB123-L00-A.stl", "AB123-L01-A.stl", "AB123-L02-A.stl"}
+    assert por_nombre["AB123-L00-A.stl"]["cerrada"]
+    assert any("agujeros" in p for p in por_nombre["AB123-L01-A.stl"]["problemas"])
+    assert any("non-manifold" in p for p in por_nombre["AB123-L02-A.stl"]["problemas"])
+    assert {p.name: p.read_bytes() for p in (tmp_path / "sale" / "AB123").iterdir()} == antes
+    # Con todas=1 entra también el -gum.stl.
+    r = _exportar_tool(reg_fs, "keep_form.analizar", None, carpeta="sale", todas=True)
+    assert len(r.outputs["mallas"]) == 4
+
+
+def test_sanar_mallas_en_lote_las_deja_totalmente_cerradas(tmp_path):
+    """La cura cierra agujeros, quita duplicadas y degeneradas, orienta, y separa las aristas
+    y los vértices non-manifold; reemplaza el archivo y la que ya estaba cerrada no se toca."""
+    _con_librerias()
+    import trimesh
+
+    d = tmp_path / "sale" / "AB123"
+    d.mkdir(parents=True)
+    trimesh.creation.icosphere(subdivisions=3, radius=8).export(d / "AB123-L00-A.stl")
+    _esfera_rota().export(d / "AB123-L01-A.stl")
+    _cubos("arista").export(d / "AB123-L02-A.stl")
+    _cubos("vertice").export(d / "AB123-L03-A.stl")
+    cerrada_antes = (d / "AB123-L00-A.stl").read_bytes()
+    vol_rota = trimesh.creation.icosphere(subdivisions=4, radius=10).volume
+    logs = []
+    r = _exportar_tool(LocalFsAdapter(root=tmp_path), "keep_form.sanar", logs, carpeta="sale", paralelo=2)
+
+    assert r.status == "ok", r.message
+    assert len(r.outputs["sanadas"]) == 3 and len(r.outputs["ya_cerradas"]) == 1 and not r.outputs["fallidas"]
+    assert r.outputs["todas_cerradas"] == "si"
+    assert (d / "AB123-L00-A.stl").read_bytes() == cerrada_antes
+    for n in ("L01", "L02", "L03"):
+        e = _medir_archivo(d / f"AB123-{n}-A.stl")
+        assert e["cerrada"], (n, e)
+    assert abs(_medir_archivo(d / "AB123-L01-A.stl")["volumen"] - vol_rota) / vol_rota < 0.01
+    assert abs(_medir_archivo(d / "AB123-L02-A.stl")["volumen"] - 2000) < 1
+    assert any("sanada" in m and "-> cerrada" in m for m in logs)
+
+
+def test_sanar_una_malla_a_otra_carpeta_y_si_no_cierra_es_error(tmp_path):
+    """Con 'archivo' cura una sola; con 'salida' deja la curada ahí y el original intacto. Un
+    agujero demasiado grande (no es de escaneo) no se tapa: error y el archivo no se toca."""
+    _con_librerias()
+    import trimesh
+
+    (tmp_path / "in").mkdir()
+    _cubos("vertice").export(tmp_path / "in" / "pieza.stl")
+    original = (tmp_path / "in" / "pieza.stl").read_bytes()
+    r = _exportar_tool(LocalFsAdapter(root=tmp_path), "keep_form.sanar", None, archivo="in/pieza.stl", salida="out")
+    assert r.status == "ok", r.message
+    assert (tmp_path / "in" / "pieza.stl").read_bytes() == original
+    assert _medir_archivo(tmp_path / "out" / "pieza.stl")["cerrada"]
+
+    # Un casquete de 16 mm de diámetro que falta: entra en las 300 aristas de model-arranger,
+    # pero taparlo plano cambia la superficie 4 %: no es un agujero de escaneo.
+    sin_tapa = trimesh.creation.icosphere(subdivisions=5, radius=10)
+    sin_tapa.update_faces(sin_tapa.vertices[sin_tapa.faces][:, :, 2].mean(1) < 6)
+    sin_tapa.export(tmp_path / "in" / "rota.stl")
+    # Y uno de más de 300 aristas, que la cura no tapa.
+    sin_mitad = trimesh.creation.icosphere(subdivisions=6, radius=10)
+    sin_mitad.update_faces(sin_mitad.vertices[sin_mitad.faces][:, :, 2].mean(1) < 0)
+    sin_mitad.export(tmp_path / "in" / "media.stl")
+    rota = (tmp_path / "in" / "rota.stl").read_bytes()
+    logs = []
+    r = _exportar_tool(LocalFsAdapter(root=tmp_path), "keep_form.sanar", logs, archivos=["in/rota.stl", "in/media.stl"])
+    assert r.status == "err" and r.error_kind == "malla_abierta"
+    motivos = {x["archivo"].split("/")[-1]: x["motivo"] for x in r.outputs["fallidas"]}
+    assert motivos["rota.stl"].startswith("la cura cambió la superficie")
+    assert motivos["media.stl"].startswith("sigue abierta tras la cura") and "agujeros" in motivos["media.stl"]
+    assert (tmp_path / "in" / "rota.stl").read_bytes() == rota
+    assert any("NO SE PUDO CERRAR" in m for m in logs)
+
+    r = _exportar_tool(LocalFsAdapter(root=tmp_path), "keep_form.sanar", None)
+    assert r.status == "err" and "'archivo'" in r.message
+
+
+def test_la_cura_triangula_agujeros_no_convexos_sin_earcut():
+    """La copia de salud.py tapa los agujeros con recorte de orejas propio (keep-form no trae
+    mapbox_earcut): un agujero en forma de L sale con k-2 triángulos que no se pisan."""
+    _con_librerias()
+    import numpy as np
+
+    from plugins.keep_form import salud
+
+    uv = np.array([[0, 0], [4, 0], [4, 1], [1, 1], [1, 4], [0, 4]], float)
+    t = salud._orejas(uv)
+    assert t.shape == (4, 3)
+    a, b, c = uv[t[:, 0]], uv[t[:, 1]], uv[t[:, 2]]
+    areas = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+    assert (areas > 0).all() and abs(areas.sum() / 2 - 7.0) < 1e-9  # área de la L, sin solapes
+    assert salud._orejas(uv[::-1]).shape == (4, 3)
