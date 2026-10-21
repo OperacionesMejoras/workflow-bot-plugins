@@ -1,13 +1,23 @@
-# Curado contra el runtime de workflow-bot-app (Python 3.12, win_amd64), con la
-# convención de EasyIndustry/workflow-bot-plugins#1: una línea por librería,
-# versión fija y hash de su wheel.
+# Curado contra el runtime de workflow-bot-app (Python 3.12) en Windows
+# (win_amd64) y en Linux (x86_64, manylinux), con la convención de
+# EasyIndustry/workflow-bot-plugins#1: una línea por librería, versión fija y
+# hash de su wheel.
+#
+# Las librerías con código compilado tienen dos hashes, el de la wheel de
+# Windows y el de la de Linux: con uno solo, en Linux pip baja la wheel
+# manylinux y la rechaza por hash ("THESE PACKAGES DO NOT MATCH THE HASHES",
+# numpy, 21/10/2026). Las de Python puro (py3-none-any) son la misma wheel en
+# los dos y llevan uno.
 #
 # Los hashes se generaron acá, bajando cada wheel de PyPI con:
 #   pip download --only-binary :all: --platform win_amd64 \
 #       --python-version 3.12 --implementation cp --abi cp312 <estas versiones>
+#   pip download --only-binary :all: --platform manylinux_2_28_x86_64 \
+#       (y los manylinux anteriores) --python-version 3.12 --implementation cp \
+#       --abi cp312 --abi abi3 --abi none <estas versiones>
 #   pip hash *.whl
 # Validado con `pip install --dry-run --require-hashes --no-index` contra esas
-# wheels, para win_amd64/cp312.
+# wheels, para win_amd64/cp312 y manylinux_2_28_x86_64/cp312.
 #
 # Cadena de dependencias completa (revisada en el METADATA de cada wheel):
 #   numpy, rtree, networkx, segno, pillow, packaging, fonttools -> nada
@@ -21,18 +31,18 @@
 # que pide convertidor: en una máquina que ya lo tiene no se reinstalan.
 # pillow==12.3.0 es la que ya trae el runtime del instalador de la app.
 
-numpy==2.5.3 --hash=sha256:0a59a421a32580a009e8a1751345bf829631b990dc1794b80514ab722b435def
-scipy==1.18.1 --hash=sha256:5e4d44984abc0020154ea81b247adeddcc3ac5527b975ff798bd1ba0adc513c2
-rtree==1.4.1 --hash=sha256:efe125f416fd27150197ab8521158662943a40f87acab8028a1aac4ad667a489
+numpy==2.5.3 --hash=sha256:0a59a421a32580a009e8a1751345bf829631b990dc1794b80514ab722b435def --hash=sha256:b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3
+scipy==1.18.1 --hash=sha256:5e4d44984abc0020154ea81b247adeddcc3ac5527b975ff798bd1ba0adc513c2 --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218
+rtree==1.4.1 --hash=sha256:efe125f416fd27150197ab8521158662943a40f87acab8028a1aac4ad667a489 --hash=sha256:12de4578f1b3381a93a655846900be4e3d5f4cd5e306b8b00aa77c1121dc7e8c
 trimesh==5.1.0 --hash=sha256:0fa85d1d131e321b683c00747c20090200b92071298b905ea588f609eb204c89
-shapely==2.2.0 --hash=sha256:90895df6542ae039fc6557dec6194e3509e883fbd6f5788e3c3e7a38fe46b257
+shapely==2.2.0 --hash=sha256:90895df6542ae039fc6557dec6194e3509e883fbd6f5788e3c3e7a38fe46b257 --hash=sha256:650a5f4d8a8e3c96982079d8c99b6ddbe6602bbd1e34c75c2b95dbc0d28ac997
 networkx==3.7 --hash=sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0
-manifold3d==3.5.4 --hash=sha256:5be1025860df8a83ed3c4fd585d87376b075e23ea45e833578fe77eacc49bee1
+manifold3d==3.5.4 --hash=sha256:5be1025860df8a83ed3c4fd585d87376b075e23ea45e833578fe77eacc49bee1 --hash=sha256:4a985892699268bbf07192b78b5e5569034c41ce74bf8183495123e8095af4fe
 segno==1.6.6 --hash=sha256:28c7d081ed0cf935e0411293a465efd4d500704072cdb039778a2ab8736190c7
-scikit-image==0.26.0 --hash=sha256:abed017474593cd3056ae0fe948d07d0747b27a085e92df5474f4955dd65aec0
+scikit-image==0.26.0 --hash=sha256:abed017474593cd3056ae0fe948d07d0747b27a085e92df5474f4955dd65aec0 --hash=sha256:7df650e79031634ac90b11e64a9eedaf5a5e06fcd09bcd03a34be01745744466
 imageio==2.38.1 --hash=sha256:36d23eb7423d2fb63f637098758edb3d2df3687f7125e0a5ce8596572022dcf9
 tifffile==2026.9.20 --hash=sha256:9b913167b8f66a57f2e7c0454486c4c4607196d494797461226166bd0755c0e6
 lazy-loader==0.6 --hash=sha256:77253be3391b06124a0e16105bd663b6c54470af1a9ca8e1cf026f38d58ed056
 packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-pillow==12.3.0 --hash=sha256:a2b55dd6b2a4c4b7d87ffa56bdb33fdc5fdb9a462173861a7bc097f17d91cb09
-fonttools==4.67.0 --hash=sha256:2bfab2f5d1d255dec82f4bd082a1c10e77df808e42210890f50a9c30bf91570e
+pillow==12.3.0 --hash=sha256:a2b55dd6b2a4c4b7d87ffa56bdb33fdc5fdb9a462173861a7bc097f17d91cb09 --hash=sha256:78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91
+fonttools==4.67.0 --hash=sha256:2bfab2f5d1d255dec82f4bd082a1c10e77df808e42210890f50a9c30bf91570e --hash=sha256:eb3c98cac93aac4b9f6e3ce2008325340b234cc9b0338ca6b513f31962a1e278
