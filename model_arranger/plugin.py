@@ -97,7 +97,7 @@ CREAR_FUENTES = Action(
 MANIFEST = PluginManifest(
     name="model-arranger",
     label="Model Arranger",
-    version="0.1.1",
+    version="0.2.0",
     doc=(
         "Órdenes, piezas y nests del taller de model-arranger desde un flujo: ingresar una carpeta de "
         "STL, validar, anidar en la cama de una impresora, cerrar y leer el resultado. "
@@ -440,12 +440,27 @@ def _nest(ctx: ToolContext, nid: int) -> dict:
     return nest
 
 
-def _salida_nest(nest: dict) -> dict:
+def _url_descarga(ctx: ToolContext, nest: dict, formato: str) -> str:
+    """
+    Dónde bajar el archivo de la cama desde el taller (>= 1.2, `GET /api/nest/descargar`).
+    Vacía mientras el nest está abierto: el archivo se escribe al cerrarlo. Se arma desde el
+    id y no desde `nest.stl`/`nest.bsz`, que son rutas de la PC del taller, y las de
+    `carpeta_export` no cuelgan de /data: el taller sirve el archivo por su cuenta.
+    """
+    if not nest.get(formato) or nest.get("id") is None:
+        return ""
+    return f"{_base(ctx)}/api/nest/descargar?id={nest['id']}&formato={formato}"
+
+
+def _salida_nest(ctx: ToolContext, nest: dict) -> dict:
     return {
         "nest": nest,
         "estado": nest.get("estado") or "",
         "densidad": nest.get("densidad") or 0.0,
         "stl": nest.get("stl") or "",
+        "bsz": nest.get("bsz") or "",
+        "bsz_url": _url_descarga(ctx, nest, "bsz"),
+        "stl_url": _url_descarga(ctx, nest, "stl"),
     }
 
 
@@ -455,7 +470,7 @@ def _abrir_nest(ctx: ToolContext) -> ToolResult:
     datos = _pedir(ctx, "POST", "/api/nests", {"impresora_id": impresora, "modo": ctx.params.get("modo") or "aprovechamiento"})
     nest = _nest(ctx, int(datos["id"]))
     return ToolResult.ok(f"nest {nest.get('codigo')} abierto en {nest.get('impresora')}", nest_id=int(datos["id"]),
-                         **_salida_nest(nest))
+                         **_salida_nest(ctx, nest))
 
 
 @_herramienta
@@ -475,7 +490,7 @@ def _anidar(ctx: ToolContext) -> ToolResult:
         cuantas = f"entraron {len(entraron)} de {len(probadas)} orden(es)"
     return ToolResult.ok(
         f"{nest.get('codigo')}: {cuantas}, densidad {nest.get('densidad') or 0}, {nest.get('estado')}",
-        tarea_id=lanzado.get("tarea_id") or 0, probadas=probadas, entraron=entraron, **_salida_nest(nest),
+        tarea_id=lanzado.get("tarea_id") or 0, probadas=probadas, entraron=entraron, **_salida_nest(ctx, nest),
     )
 
 
@@ -487,7 +502,7 @@ def _cerrar_nest(ctx: ToolContext) -> ToolResult:
     if final is None:
         return ToolResult.ok(f"cerrando el nest {nid} (tarea {lanzado.get('tarea_id')})", tarea_id=lanzado.get("tarea_id") or 0)
     nest = _nest(ctx, nid)
-    salida = _salida_nest(nest)
+    salida = _salida_nest(ctx, nest)
     salida["stl"] = (final.get("resultado") or {}).get("stl") or salida["stl"]
     if salida["estado"] != "cerrado":
         # Pasa si el taller se reinició a mitad del cierre: la tarea se perdió y el nest sigue abierto.
@@ -499,7 +514,7 @@ def _cerrar_nest(ctx: ToolContext) -> ToolResult:
 @_herramienta
 def _ver_nest(ctx: ToolContext) -> ToolResult:
     nest = _nest(ctx, _id(ctx.params["nest"], "N", "nest"))
-    return ToolResult.ok(f"{nest.get('codigo')}: {nest.get('estado')}", **_salida_nest(nest))
+    return ToolResult.ok(f"{nest.get('codigo')}: {nest.get('estado')}", **_salida_nest(ctx, nest))
 
 
 @_herramienta
@@ -538,6 +553,9 @@ _SALIDA_NEST = (
     Output("estado", ParamType.STR, doc="'abierto' o 'cerrado'."),
     Output("densidad", ParamType.FLOAT),
     Output("stl", ParamType.STR, doc="Ruta del STL de la cama, cuando está cerrado, en la PC del taller."),
+    Output("bsz", ParamType.STR, doc="Ruta del .bsz de la cama (el layout de Baklava, con cada pieza ubicada), cuando está cerrado, en la PC del taller. Es el entregable para la impresora; el STL queda de respaldo."),
+    Output("bsz_url", ParamType.STR, doc="URL para bajar el .bsz del taller (versión 1.2 o posterior). Vacía mientras el nest está abierto."),
+    Output("stl_url", ParamType.STR, doc="Lo mismo para el STL de la cama."),
 )
 
 
@@ -596,9 +614,9 @@ TOOLS = (
            (Output("tarea_id", ParamType.INT),
             Output("probadas", ParamType.JSON, doc="[{orden_id, entro}]"),
             Output("entraron", ParamType.JSON, doc="Ids de las órdenes que entraron.")) + _SALIDA_NEST), _anidar),
-    (_tool("cerrar_nest", "cerrar nest", "Cierra el nest y exporta el STL de la cama.",
+    (_tool("cerrar_nest", "cerrar nest", "Cierra el nest y exporta la cama: el .bsz (layout de Baklava, el entregable) y el STL de respaldo.",
            (_NEST, _ESPERAR), (Output("tarea_id", ParamType.INT),) + _SALIDA_NEST), _cerrar_nest),
-    (_tool("nest", "ver nest", "Lee un nest: estado, densidad, STL, renders y órdenes que tiene.",
+    (_tool("nest", "ver nest", "Lee un nest: estado, densidad, STL, .bsz, sus URL de descarga, renders y órdenes que tiene.",
            (_NEST,), _SALIDA_NEST, lee=True), _ver_nest),
     (_tool("esperar_tarea", "esperar tarea",
            "Espera a que termine una tarea del taller lanzada con esperar=false.",

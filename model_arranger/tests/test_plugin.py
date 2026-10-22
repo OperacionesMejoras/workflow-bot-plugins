@@ -165,8 +165,9 @@ class Taller:
         if path == "/api/nest/cerrar":
             nid = int(b["id"])
             stl = f"camas/N-{nid:04d}.stl"
+            bsz = f"camas/N-{nid:04d}.bsz"
             tid, ocupado = self._tarea("cerrar", {"stl": stl},
-                                       al_terminar=lambda: self.nests[nid].update(estado="cerrado", stl=stl))
+                                       al_terminar=lambda: self.nests[nid].update(estado="cerrado", stl=stl, bsz=bsz))
             return ocupado or _json({"ok": True, "tarea_id": tid})
         if path == "/api/nest/falla":
             tid, ocupado = self._tarea("cerrar", error="sparrow se cayó")
@@ -343,6 +344,21 @@ def test_cerrar_nest_devuelve_el_stl():
     r, taller, _ = _correr("cerrar_nest", {"nest": 1}, _con_nest())
     assert r.status == "ok"
     assert r.outputs["stl"] == "camas/N-0001.stl" and r.outputs["estado"] == "cerrado"
+
+
+def test_cerrar_nest_devuelve_el_bsz_y_las_url_para_bajar_los_archivos():
+    r, _, _ = _correr("cerrar_nest", {"nest": 1}, _con_nest())
+
+    assert r.outputs["bsz"] == "camas/N-0001.bsz"
+    # La URL sale del id, no de la ruta: con carpeta_export la ruta no cuelga de /data.
+    assert r.outputs["bsz_url"].endswith("/api/nest/descargar?id=1&formato=bsz")
+    assert r.outputs["stl_url"].endswith("/api/nest/descargar?id=1&formato=stl")
+
+
+def test_un_nest_abierto_no_tiene_url_de_descarga():
+    r, _, _ = _correr("nest", {"nest": 1}, _con_nest())
+
+    assert r.outputs["bsz"] == "" and r.outputs["bsz_url"] == "" and r.outputs["stl_url"] == ""
 
 
 def test_ocupado_espera_la_otra_tarea_y_reintenta():
